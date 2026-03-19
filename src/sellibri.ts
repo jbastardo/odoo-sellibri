@@ -55,22 +55,47 @@ const client: AxiosInstance = axios.create({
   maxContentLength: Infinity,
 });
 
+/** Retry wrapper for 429 (Too Many Requests) with exponential backoff */
+async function withRetry<T>(fn: () => Promise<T>, maxRetries = 3): Promise<T> {
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      return await fn();
+    } catch (err: any) {
+      const status = (err as AxiosError)?.response?.status;
+      if (status === 429 && attempt < maxRetries) {
+        const waitSec = Math.pow(2, attempt + 1) * 15; // 30s, 60s, 120s
+        logger.warn(MODULE, `Rate limited (429), waiting ${waitSec}s before retry ${attempt + 1}/${maxRetries}`);
+        await new Promise(resolve => setTimeout(resolve, waitSec * 1000));
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw new Error('Max retries exceeded');
+}
+
 async function apiGet<T = any>(path: string, params?: Record<string, any>): Promise<T> {
-  await rateLimiter.waitForSlot();
-  const resp = await client.get(path, { params });
-  return resp.data;
+  return withRetry(async () => {
+    await rateLimiter.waitForSlot();
+    const resp = await client.get(path, { params });
+    return resp.data;
+  });
 }
 
 async function apiPost<T = any>(path: string, data: any): Promise<T> {
-  await rateLimiter.waitForSlot();
-  const resp = await client.post(path, data);
-  return resp.data;
+  return withRetry(async () => {
+    await rateLimiter.waitForSlot();
+    const resp = await client.post(path, data);
+    return resp.data;
+  });
 }
 
 async function apiPatch<T = any>(path: string, data: any): Promise<T> {
-  await rateLimiter.waitForSlot();
-  const resp = await client.patch(path, data);
-  return resp.data;
+  return withRetry(async () => {
+    await rateLimiter.waitForSlot();
+    const resp = await client.patch(path, data);
+    return resp.data;
+  });
 }
 
 export interface SellibriMasterAttributes {
