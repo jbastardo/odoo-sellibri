@@ -234,7 +234,6 @@
       try {
         document.getElementById('btn-products').disabled = true;
         document.getElementById('btn-stock').disabled = true;
-        document.getElementById('btn-photos').disabled = true;
         await fetch(`/api/sync/${type}`, { method: 'POST' });
         setTimeout(fetchStatus, 1000);
       } catch (err) {
