@@ -4,37 +4,40 @@ import { logger } from './logger';
 
 const MODULE = 'sellibri';
 
-// Rate limiter: 4 req/sec, 240/min
-class RateLimiter {
-  private timestamps: number[] = [];
-  private readonly maxPerSecond = 4;
-  private readonly maxPerMinute = 240;
+// ─── Adaptive Rate Limiter ─────────────────────────────────────
+// Conservative: 2 req/sec steady, global cooldown on 429
+
+class AdaptiveRateLimiter {
+  private lastRequestTime = 0;
+  private minInterval = 600; // 600ms between requests = ~1.6 req/sec (safe under 4/sec limit)
+  private cooldownUntil = 0; // Global cooldown timestamp — all requests wait
 
   async waitForSlot(): Promise<void> {
+    // Wait for global cooldown (set when ANY request gets a 429)
     const now = Date.now();
-
-    // Clean old timestamps
-    this.timestamps = this.timestamps.filter(t => now - t < 60_000);
-
-    // Check per-minute limit
-    if (this.timestamps.length >= this.maxPerMinute) {
-      const oldest = this.timestamps[0];
-      const waitMs = 60_000 - (now - oldest) + 50;
-      logger.warn(MODULE, `Rate limit (per-min): waiting ${waitMs}ms`);
+    if (this.cooldownUntil > now) {
+      const waitMs = this.cooldownUntil - now;
+      logger.warn(MODULE, `Global cooldown active, waiting ${Math.round(waitMs / 1000)}s`);
       await this.delay(waitMs);
-      return this.waitForSlot();
     }
 
-    // Check per-second limit
-    const recentSecond = this.timestamps.filter(t => now - t < 1000);
-    if (recentSecond.length >= this.maxPerSecond) {
-      const oldest = recentSecond[0];
-      const waitMs = 1000 - (now - oldest) + 50;
-      await this.delay(waitMs);
-      return this.waitForSlot();
+    // Ensure minimum interval between requests
+    const elapsed = Date.now() - this.lastRequestTime;
+    if (elapsed < this.minInterval) {
+      await this.delay(this.minInterval - elapsed);
     }
 
-    this.timestamps.push(Date.now());
+    this.lastRequestTime = Date.now();
+  }
+
+  /** Called when we get a 429 — blocks ALL subsequent requests for the given duration */
+  triggerCooldown(durationMs: number): void {
+    const newCooldown = Date.now() + durationMs;
+    // Only extend cooldown, never shorten it
+    if (newCooldown > this.cooldownUntil) {
+      this.cooldownUntil = newCooldown;
+      logger.warn(MODULE, `429 received — global cooldown for ${Math.round(durationMs / 1000)}s`);
+    }
   }
 
   private delay(ms: number): Promise<void> {
@@ -42,7 +45,7 @@ class RateLimiter {
   }
 }
 
-const rateLimiter = new RateLimiter();
+const rateLimiter = new AdaptiveRateLimiter();
 
 const client: AxiosInstance = axios.create({
   baseURL: config.sellibri.baseUrl,
@@ -55,17 +58,18 @@ const client: AxiosInstance = axios.create({
   maxContentLength: Infinity,
 });
 
-/** Retry wrapper for 429 (Too Many Requests) with exponential backoff */
-async function withRetry<T>(fn: () => Promise<T>, maxRetries = 3): Promise<T> {
+/** Retry wrapper with adaptive backoff on 429 */
+async function withRetry<T>(fn: () => Promise<T>, maxRetries = 4): Promise<T> {
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     try {
       return await fn();
     } catch (err: any) {
       const status = (err as AxiosError)?.response?.status;
       if (status === 429 && attempt < maxRetries) {
-        const waitSec = Math.pow(2, attempt + 1) * 15; // 30s, 60s, 120s
-        logger.warn(MODULE, `Rate limited (429), waiting ${waitSec}s before retry ${attempt + 1}/${maxRetries}`);
-        await new Promise(resolve => setTimeout(resolve, waitSec * 1000));
+        // Exponential: 45s, 90s, 180s, 360s
+        const waitMs = Math.pow(2, attempt) * 45_000;
+        rateLimiter.triggerCooldown(waitMs);
+        await new Promise(resolve => setTimeout(resolve, waitMs));
         continue;
       }
       throw err;
@@ -97,6 +101,16 @@ async function apiPatch<T = any>(path: string, data: any): Promise<T> {
     return resp.data;
   });
 }
+
+async function apiDelete<T = any>(path: string): Promise<T> {
+  return withRetry(async () => {
+    await rateLimiter.waitForSlot();
+    const resp = await client.delete(path);
+    return resp.data;
+  });
+}
+
+// ─── Interfaces ────────────────────────────────────────────────
 
 export interface SellibriMasterAttributes {
   sku?: string;
@@ -146,12 +160,14 @@ export interface SellibriProduct {
   taxon_ids?: number[];
 }
 
+// ─── Catalog Loading ───────────────────────────────────────────
+
 /** Fetch ALL products from Sellibri with pagination. Builds SKU→product map.
- *  Note: Sellibri API caps per_page at 50 regardless of what you request. */
+ *  Resilient: skips individual page errors, stops after 5 consecutive failures. */
 export async function fetchAllProducts(): Promise<Map<string, SellibriProduct>> {
   const map = new Map<string, SellibriProduct>();
   let page = 1;
-  const perPage = 50; // API maximum is 50
+  const perPage = 50;
   let consecutiveErrors = 0;
 
   while (true) {
@@ -160,7 +176,7 @@ export async function fetchAllProducts(): Promise<Map<string, SellibriProduct>> 
       const products: SellibriProduct[] = data.products || [];
       if (products.length === 0) break;
 
-      consecutiveErrors = 0; // Reset on success
+      consecutiveErrors = 0;
 
       for (const p of products) {
         for (const v of p.all_variants || []) {
@@ -171,17 +187,15 @@ export async function fetchAllProducts(): Promise<Map<string, SellibriProduct>> 
       }
 
       if (page % 20 === 0 || products.length < perPage) {
-        logger.info(MODULE, `Loaded Sellibri catalog page ${page} (${map.size} SKUs total)`);
+        logger.info(MODULE, `Catalog page ${page} (${map.size} SKUs)`);
       }
       if (products.length < perPage) break;
     } catch (err: any) {
       const status = (err as AxiosError)?.response?.status;
       consecutiveErrors++;
-      logger.warn(MODULE, `Catalog page ${page} failed (HTTP ${status || '?'}): ${err.message} [consecutive errors: ${consecutiveErrors}]`);
-
-      // If too many consecutive errors, stop to avoid infinite loop
+      logger.warn(MODULE, `Catalog page ${page} error (HTTP ${status || '?'}): ${err.message} [${consecutiveErrors}/5]`);
       if (consecutiveErrors >= 5) {
-        logger.error(MODULE, `Too many consecutive errors loading catalog, stopping at page ${page}`);
+        logger.error(MODULE, `Too many consecutive errors, stopping at page ${page}`);
         break;
       }
     }
@@ -192,36 +206,7 @@ export async function fetchAllProducts(): Promise<Map<string, SellibriProduct>> 
   return map;
 }
 
-/** Search for a product by SKU by scanning ALL pages.
- *  Sellibri API ignores query/filter parameters, so we must paginate
- *  through the entire catalog and match variant SKU locally. */
-export async function findProductBySku(sku: string): Promise<SellibriProduct | null> {
-  try {
-    let page = 1;
-    while (true) {
-      const data = await apiGet('/products', { per_page: 50, page });
-      const products: SellibriProduct[] = data.products || [];
-      if (products.length === 0) break;
-
-      for (const p of products) {
-        for (const v of p.all_variants || []) {
-          if (v.sku === sku) {
-            return p;
-          }
-        }
-      }
-
-      if (products.length < 50) break;
-      page++;
-    }
-    return null;
-  } catch (err: any) {
-    if ((err as AxiosError)?.response?.status === 404) return null;
-    throw err;
-  }
-}
-
-/** Fetch a single Sellibri product by its ID (full details) */
+/** Fetch a single Sellibri product by its ID */
 export async function fetchProductById(id: number): Promise<SellibriProduct | null> {
   try {
     const data = await apiGet(`/products/${id}`);
@@ -231,6 +216,8 @@ export async function fetchProductById(id: number): Promise<SellibriProduct | nu
     throw err;
   }
 }
+
+// ─── CRUD ──────────────────────────────────────────────────────
 
 export async function createProduct(payload: SellibriProductPayload): Promise<SellibriProduct> {
   const data = await apiPost('/products', payload);
@@ -242,24 +229,15 @@ export async function updateProduct(id: number, payload: SellibriProductPayload)
   return data.product || data;
 }
 
-async function apiDelete<T = any>(path: string): Promise<T> {
-  return withRetry(async () => {
-    await rateLimiter.waitForSlot();
-    const resp = await client.delete(path);
-    return resp.data;
-  });
-}
-
 /** Delete a product from Sellibri by its ID */
 export async function deleteProduct(id: number): Promise<boolean> {
   try {
     await apiDelete(`/products/${id}`);
-    logger.info(MODULE, `Deleted product id=${id} from Sellibri`);
+    logger.info(MODULE, `Deleted product id=${id}`);
     return true;
   } catch (err: any) {
     const status = (err as AxiosError)?.response?.status;
     if (status === 404) {
-      logger.warn(MODULE, `Product id=${id} already deleted (404)`);
       return true; // Already gone
     }
     logger.error(MODULE, `Failed to delete product id=${id}: ${err.message}`);
@@ -273,7 +251,6 @@ export async function deactivateProduct(id: number): Promise<boolean> {
     await apiPatch(`/products/${id}`, {
       product: { title: '', status: 'draft' },
     });
-    logger.info(MODULE, `Deactivated product id=${id} (status=draft)`);
     return true;
   } catch (err: any) {
     logger.error(MODULE, `Failed to deactivate product id=${id}: ${err.message}`);
@@ -281,41 +258,22 @@ export async function deactivateProduct(id: number): Promise<boolean> {
   }
 }
 
-export async function updateVariantStock(
-  variantId: number,
-  stockLocationId: number,
-  available: number,
-): Promise<void> {
-  await apiPatch(`/variants/${variantId}`, {
-    variant: {
-      stock_items: [{
-        stock_location_id: stockLocationId,
-        available: Math.max(0, Math.floor(available)),
-      }],
-    },
-  });
-}
+// ─── Sequential Batch Executor ─────────────────────────────────
+// Concurrency = 1 to avoid overloading Sellibri API
 
-/** Batch execute promises with concurrency limit, respecting rate limiter */
 export async function batchExecute<T>(
   tasks: (() => Promise<T>)[],
-  concurrency: number = 3,
+  _concurrency: number = 1, // Ignored — always sequential to prevent 429 storms
 ): Promise<(T | Error)[]> {
   const results: (T | Error)[] = new Array(tasks.length);
-  let index = 0;
 
-  async function worker() {
-    while (index < tasks.length) {
-      const i = index++;
-      try {
-        results[i] = await tasks[i]();
-      } catch (err: any) {
-        results[i] = err instanceof Error ? err : new Error(String(err));
-      }
+  for (let i = 0; i < tasks.length; i++) {
+    try {
+      results[i] = await tasks[i]();
+    } catch (err: any) {
+      results[i] = err instanceof Error ? err : new Error(String(err));
     }
   }
 
-  const workers = Array.from({ length: Math.min(concurrency, tasks.length) }, () => worker());
-  await Promise.all(workers);
   return results;
 }
