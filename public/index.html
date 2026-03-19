@@ -53,7 +53,7 @@
     </div>
 
     <!-- Action Buttons -->
-    <div class="flex gap-3 mb-8">
+    <div class="flex flex-wrap gap-3 mb-6">
       <button onclick="triggerSync('products')" id="btn-products"
         class="bg-blue-600 hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed text-white px-4 py-2 rounded-lg font-medium transition">
         Sincronizar Productos
@@ -62,9 +62,25 @@
         class="bg-green-600 hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed text-white px-4 py-2 rounded-lg font-medium transition">
         Sincronizar Stock
       </button>
+      <button onclick="triggerPhotoSync()" id="btn-photos"
+        class="bg-purple-600 hover:bg-purple-700 disabled:opacity-50 disabled:cursor-not-allowed text-white px-4 py-2 rounded-lg font-medium transition">
+        🖼️ Sync Fotos
+      </button>
       <button onclick="fetchStatus()" class="bg-gray-700 hover:bg-gray-600 text-white px-4 py-2 rounded-lg font-medium transition">
         Refrescar
       </button>
+    </div>
+
+    <!-- SKU Force Sync -->
+    <div class="flex gap-3 mb-8 items-center">
+      <input type="text" id="sku-input" placeholder="Ingresa un SKU..."
+        class="bg-gray-800 border border-gray-600 text-white px-4 py-2 rounded-lg w-64 focus:outline-none focus:border-orange-500 transition"
+        onkeydown="if(event.key==='Enter') forceSyncSku()">
+      <button onclick="forceSyncSku()" id="btn-force-sku"
+        class="bg-orange-600 hover:bg-orange-700 disabled:opacity-50 disabled:cursor-not-allowed text-white px-4 py-2 rounded-lg font-medium transition">
+        🔄 Actualizar SKU
+      </button>
+      <span id="sku-result" class="text-sm ml-2"></span>
     </div>
 
     <!-- Error Display -->
@@ -130,17 +146,20 @@
         const statusEl = document.getElementById('sync-status');
         const btnProducts = document.getElementById('btn-products');
         const btnStock = document.getElementById('btn-stock');
+        const btnPhotos = document.getElementById('btn-photos');
 
         if (sync.isRunning) {
           statusEl.textContent = 'Sincronizando...';
           statusEl.className = 'text-lg font-bold mt-1 text-yellow-400';
           btnProducts.disabled = true;
           btnStock.disabled = true;
+          btnPhotos.disabled = true;
         } else {
           statusEl.textContent = 'Inactivo';
           statusEl.className = 'text-lg font-bold mt-1 text-green-400';
           btnProducts.disabled = false;
           btnStock.disabled = false;
+          btnPhotos.disabled = false;
         }
 
         // Progress bar
@@ -207,10 +226,59 @@
       try {
         document.getElementById('btn-products').disabled = true;
         document.getElementById('btn-stock').disabled = true;
+        document.getElementById('btn-photos').disabled = true;
         await fetch(`/api/sync/${type}`, { method: 'POST' });
         setTimeout(fetchStatus, 1000);
       } catch (err) {
         alert('Error: ' + err.message);
+      }
+    }
+
+    async function triggerPhotoSync() {
+      try {
+        document.getElementById('btn-products').disabled = true;
+        document.getElementById('btn-stock').disabled = true;
+        document.getElementById('btn-photos').disabled = true;
+        await fetch('/api/sync/photos', { method: 'POST' });
+        setTimeout(fetchStatus, 1000);
+      } catch (err) {
+        alert('Error: ' + err.message);
+      }
+    }
+
+    async function forceSyncSku() {
+      const input = document.getElementById('sku-input');
+      const resultEl = document.getElementById('sku-result');
+      const btn = document.getElementById('btn-force-sku');
+      const sku = input.value.trim();
+
+      if (!sku) {
+        resultEl.textContent = 'Ingresa un SKU';
+        resultEl.className = 'text-sm ml-2 text-yellow-400';
+        return;
+      }
+
+      btn.disabled = true;
+      resultEl.textContent = 'Procesando...';
+      resultEl.className = 'text-sm ml-2 text-blue-400';
+
+      try {
+        const resp = await fetch(`/api/sync/sku/${encodeURIComponent(sku)}`, { method: 'POST' });
+        const data = await resp.json();
+
+        if (data.success) {
+          resultEl.textContent = '\u2713 ' + data.message;
+          resultEl.className = 'text-sm ml-2 text-green-400';
+        } else {
+          resultEl.textContent = '\u2717 ' + data.message;
+          resultEl.className = 'text-sm ml-2 text-red-400';
+        }
+      } catch (err) {
+        resultEl.textContent = '\u2717 Error: ' + err.message;
+        resultEl.className = 'text-sm ml-2 text-red-400';
+      } finally {
+        btn.disabled = false;
+        setTimeout(fetchStatus, 1000);
       }
     }
 

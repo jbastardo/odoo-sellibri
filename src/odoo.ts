@@ -237,6 +237,23 @@ export async function findProductBySku(sku: string): Promise<number | null> {
   return ids.length > 0 ? ids[0] : null;
 }
 
+/** Fetch a single product by SKU with all sync-relevant fields */
+export async function fetchProductBySku(sku: string): Promise<OdooProduct | null> {
+  const products = await execute('product.product', 'search_read', [
+    [['default_code', '=', sku], ['sale_ok', '=', true], ['type', '=', 'product']],
+  ], {
+    fields: [
+      'name', 'default_code', 'list_price', 'qty_available', 'weight',
+      'barcode', 'categ_id', 'brand_id', 'description_sale',
+      'website_description', 'product_template_image_ids',
+      'write_date', 'sale_ok', 'type',
+    ],
+    limit: 1,
+  });
+  if (products && products.length > 0) return products[0] as OdooProduct;
+  return null;
+}
+
 export async function createSaleOrder(partnerId: number, lines: { product_id: number; product_uom_qty: number; price_unit: number }[]): Promise<number> {
   const orderLines = lines.map(l => [0, 0, {
     product_id: l.product_id,

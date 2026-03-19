@@ -98,16 +98,26 @@ export interface SellibriProductPayload {
   };
 }
 
+export interface SellibriVariantDetail {
+  id: number;
+  sku: string;
+  price: string;
+  barcode: string | null;
+  weight: string | null;
+  width: string | null;
+  height: string | null;
+  length: string | null;
+  images: { id: number; url: string }[];
+  stock_items: { id: number; stock_location_id: number; available: number }[];
+}
+
 export interface SellibriProduct {
   id: number;
   title: string;
   status: string;
-  all_variants: {
-    id: number;
-    sku: string;
-    price: string;
-    stock_items: { id: number; stock_location_id: number; available: number }[];
-  }[];
+  description: string | null;
+  all_variants: SellibriVariantDetail[];
+  taxon_ids?: number[];
 }
 
 /** Fetch ALL products from Sellibri with pagination. Builds SKU→product map. */
@@ -145,6 +155,17 @@ export async function findProductBySku(sku: string): Promise<SellibriProduct | n
       return products[0];
     }
     return null;
+  } catch (err: any) {
+    if ((err as AxiosError)?.response?.status === 404) return null;
+    throw err;
+  }
+}
+
+/** Fetch a single Sellibri product by its ID (full details) */
+export async function fetchProductById(id: number): Promise<SellibriProduct | null> {
+  try {
+    const data = await apiGet(`/products/${id}`);
+    return data.product || data || null;
   } catch (err: any) {
     if ((err as AxiosError)?.response?.status === 404) return null;
     throw err;

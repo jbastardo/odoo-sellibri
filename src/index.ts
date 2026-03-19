@@ -3,7 +3,7 @@ import * as cron from 'node-cron';
 import * as path from 'path';
 import { config } from './config';
 import { logger } from './logger';
-import { syncProducts, syncStock, getSyncStatus } from './sync';
+import { syncProducts, syncStock, syncSingleSku, syncPhotos, getSyncStatus } from './sync';
 import { handleOrderWebhook, getRecentOrders } from './webhook';
 
 const app = express();
@@ -54,6 +54,31 @@ app.post('/api/sync/stock', async (_req, res) => {
   res.json({ message: 'Stock sync started' });
   syncStock().catch(err => {
     logger.error('api', `Manual stock sync error: ${err.message}`);
+  });
+});
+
+// Force sync a single SKU (all fields + images)
+app.post('/api/sync/sku/:sku', async (req, res) => {
+  const { sku } = req.params;
+  if (!sku || sku.trim() === '') {
+    res.status(400).json({ success: false, message: 'SKU requerido' });
+    return;
+  }
+  logger.info('api', `Manual force sync for SKU=${sku}`);
+  const result = await syncSingleSku(sku.trim());
+  res.json(result);
+});
+
+// Sync photos for products without images
+app.post('/api/sync/photos', async (_req, res) => {
+  const status = getSyncStatus();
+  if (status.isRunning) {
+    res.json({ message: 'Sync already running' });
+    return;
+  }
+  res.json({ message: 'Photo sync started' });
+  syncPhotos().catch(err => {
+    logger.error('api', `Photo sync error: ${err.message}`);
   });
 });
 
