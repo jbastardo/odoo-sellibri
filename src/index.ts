@@ -3,7 +3,7 @@ import * as cron from 'node-cron';
 import * as path from 'path';
 import { config } from './config';
 import { logger } from './logger';
-import { syncProducts, syncPriceStock, syncSingleSku, syncPhotos, syncCleanup, getSyncStatus, requestAbort, resetSyncState } from './sync';
+import { syncProducts, syncPriceStock, syncSingleSku, syncPhotos, syncCleanup, syncFixTitlesSku, getSyncStatus, requestAbort, resetSyncState } from './sync';
 import { handleOrderWebhook, getRecentOrders } from './webhook';
 
 const app = express();
@@ -107,6 +107,18 @@ app.post('/api/sync/cleanup', async (_req, res) => {
     .then(result => logger.info('api', `Limpieza: ${result.deleted} eliminados, ${result.failed} fallidos, ${result.orphanSkus.length} huérfanos`))
     .catch(err => logger.error('api', `Cleanup error: ${err.message}`))
     .finally(() => endManualAction('Limpieza'));
+});
+
+app.post('/api/sync/fix-titles-sku', async (_req, res) => {
+  if (!startManualAction('Corregir Títulos/SKU')) {
+    res.json({ message: 'Ya hay una sincronización en curso' });
+    return;
+  }
+  res.json({ message: 'Corrección de títulos y SKU iniciada' });
+  syncFixTitlesSku()
+    .then(result => logger.info('api', `Fix títulos/SKU: ${result.titleFixed} títulos corregidos, ${result.skuFixed} SKUs corregidos, ${result.skipped} sin cambios, ${result.errors} errores`))
+    .catch(err => logger.error('api', `Fix títulos/SKU error: ${err.message}`))
+    .finally(() => endManualAction('Corregir Títulos/SKU'));
 });
 
 // Abort sync

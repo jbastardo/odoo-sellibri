@@ -684,6 +684,182 @@ export async function syncCleanup(): Promise<CleanupResult> {
   return result;
 }
 
+// ─── Fix Titles & SKU ──────────────────────────────────────────
+
+let fixTitlesRunning = false;
+
+export interface FixTitlesResult {
+  total: number;
+  matched: number;
+  titleFixed: number;
+  skuFixed: number;
+  skipped: number;
+  errors: number;
+}
+
+/**
+ * One-time corrective run: compare Odoo titles/SKUs against Sellibri
+ * and PATCH any differences. Does NOT touch price, stock, or status.
+ */
+export async function syncFixTitlesSku(): Promise<FixTitlesResult> {
+  if (fixTitlesRunning || productSyncRunning || stockSyncRunning) {
+    logger.warn(MODULE, 'Fix titles: another sync is running, skipping');
+    return { total: 0, matched: 0, titleFixed: 0, skuFixed: 0, skipped: 0, errors: 0 };
+  }
+  fixTitlesRunning = true;
+  syncStatus.isRunning = true;
+  syncStatus.lastError = null;
+
+  const result: FixTitlesResult = {
+    total: 0, matched: 0, titleFixed: 0, skuFixed: 0, skipped: 0, errors: 0,
+  };
+
+  try {
+    // Phase 1: Load Sellibri catalog
+    syncStatus.progress = {
+      current: 0, total: 0,
+      phase: 'Corregir Títulos/SKU: cargando catálogo Sellibri...',
+      startedAt: new Date().toISOString(),
+      estimatedSecondsLeft: null,
+    };
+    logger.info(MODULE, 'Fix titles Phase 1: Loading Sellibri catalog...');
+    const sellibriCatalog = await sellibri.fetchAllProducts();
+    logger.info(MODULE, `Sellibri catalog loaded: ${sellibriCatalog.size} SKUs`);
+
+    // Phase 2: Fetch all products from Odoo
+    syncStatus.progress.phase = 'Corregir Títulos/SKU: obteniendo productos de Odoo...';
+    logger.info(MODULE, 'Fix titles Phase 2: Fetching products from Odoo...');
+    const odooProducts = await odoo.fetchAllProducts();
+    logger.info(MODULE, `Odoo returned ${odooProducts.length} products`);
+
+    // Phase 3: Compare and fix
+    const toFix: { odoo: odoo.OdooProduct; sellibri: sellibri.SellibriProduct }[] = [];
+
+    for (const op of odooProducts) {
+      const sku = op.default_code;
+      if (!sku) continue;
+      result.total++;
+
+      const sp = sellibriCatalog.get(sku);
+      if (!sp) continue;
+      result.matched++;
+
+      const variant = sp.all_variants?.[0];
+      if (!variant) continue;
+
+      // Compare title
+      const odooTitle = (op.name || '').trim();
+      const sellibriTitle = (sp.title || '').trim();
+      const titleDiff = odooTitle && sellibriTitle !== odooTitle;
+
+      // Compare SKU on the variant level
+      const sellibriSku = (variant.sku || '').trim();
+      const skuDiff = sku && sellibriSku !== sku;
+
+      if (titleDiff || skuDiff) {
+        toFix.push({ odoo: op, sellibri: sp });
+      } else {
+        result.skipped++;
+      }
+    }
+
+    logger.info(MODULE, `Fix titles: ${toFix.length} products need correction, ${result.skipped} already correct`);
+
+    if (toFix.length === 0) {
+      logger.info(MODULE, 'Fix titles: nothing to fix — all titles and SKUs match');
+      return result;
+    }
+
+    // Phase 4: Patch products sequentially
+    const total = toFix.length;
+    const batchStartTime = Date.now();
+    syncStatus.progress = {
+      current: 0, total,
+      phase: `Corrigiendo títulos/SKU: 0 / ${total}...`,
+      startedAt: new Date().toISOString(),
+      estimatedSecondsLeft: null,
+    };
+
+    for (let i = 0; i < toFix.length; i++) {
+      if (abortRequested) break;
+
+      const { odoo: op, sellibri: sp } = toFix[i];
+      const sku = op.default_code;
+      const variant = sp.all_variants?.[0];
+
+      try {
+        const odooTitle = (op.name || '').trim();
+        const sellibriTitle = (sp.title || '').trim();
+        const sellibriSku = (variant?.sku || '').trim();
+
+        const titleNeedsFix = odooTitle && sellibriTitle !== odooTitle;
+        const skuNeedsFix = sku && sellibriSku !== sku;
+
+        // Build minimal payload — ONLY title and/or sku
+        const payload: sellibri.SellibriProductPayload = {
+          product: {},
+        };
+
+        if (titleNeedsFix) {
+          payload.product.title = odooTitle;
+        }
+
+        // SKU goes in master_attributes
+        if (skuNeedsFix) {
+          payload.product.master_attributes = { sku };
+        }
+
+        // Sellibri requires title in the payload — if we're not fixing it, send current
+        if (!payload.product.title) {
+          payload.product.title = sellibriTitle || odooTitle;
+        }
+
+        await sellibri.updateProduct(sp.id, payload);
+
+        if (titleNeedsFix) {
+          result.titleFixed++;
+          logger.info(MODULE, `Fixed title SKU=${sku}: "${sellibriTitle}" → "${odooTitle}"`);
+        }
+        if (skuNeedsFix) {
+          result.skuFixed++;
+          logger.info(MODULE, `Fixed SKU variant: "${sellibriSku}" → "${sku}"`);
+        }
+      } catch (err: any) {
+        result.errors++;
+        logger.error(MODULE, `Fix title error SKU=${sku}: ${err.message}`);
+      }
+
+      const done = result.titleFixed + result.skuFixed + result.skipped + result.errors;
+      const elapsed = (Date.now() - batchStartTime) / 1000;
+      const rate = (i + 1) > 0 ? elapsed / (i + 1) : 1;
+      syncStatus.progress = {
+        current: i + 1,
+        total,
+        phase: `Corrigiendo títulos/SKU: ${i + 1} / ${total}...`,
+        startedAt: syncStatus.progress?.startedAt || new Date().toISOString(),
+        estimatedSecondsLeft: Math.round((total - i - 1) * rate),
+      };
+
+      if ((i + 1) % 50 === 0) {
+        logger.info(MODULE, `Fix titles progress: ${i + 1}/${total} (titles=${result.titleFixed}, skus=${result.skuFixed}, errors=${result.errors})`);
+      }
+    }
+
+    const totalTime = ((Date.now() - batchStartTime) / 1000 / 60).toFixed(1);
+    logger.info(MODULE, `Fix titles ${abortRequested ? 'ABORTED' : 'complete'} in ${totalTime}min: ${result.titleFixed} titles fixed, ${result.skuFixed} SKUs fixed, ${result.skipped} already correct, ${result.errors} errors`);
+  } catch (err: any) {
+    syncStatus.lastError = err.message;
+    logger.error(MODULE, `Fix titles failed: ${err.message}`);
+  } finally {
+    fixTitlesRunning = false;
+    abortRequested = false;
+    syncStatus.isRunning = productSyncRunning || stockSyncRunning;
+    syncStatus.progress = null;
+  }
+
+  return result;
+}
+
 // ─── Precio/Stock Sync ─────────────────────────────────────────
 
 export async function syncPriceStock(): Promise<void> {
