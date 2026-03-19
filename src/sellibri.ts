@@ -73,29 +73,28 @@ async function apiPatch<T = any>(path: string, data: any): Promise<T> {
   return resp.data;
 }
 
-export interface SellibriVariant {
-  id?: number;
-  price: string;
-  sku: string;
+export interface SellibriMasterAttributes {
+  sku?: string;
+  price?: string;
   barcode?: string;
   weight?: number;
   width?: number | null;
   height?: number | null;
   length?: number | null;
-  track_inventory: boolean;
-  tax_rate_id: number;
-  images?: { image: string }[];
-  stock_items?: { stock_location_id: number; available: number }[];
+  track_inventory?: boolean;
+  tax_rate_id?: number;
+  stock_items_attributes?: { stock_location_id: number; available: number }[];
 }
 
 export interface SellibriProductPayload {
   product: {
     title: string;
+    slug?: string;
     status?: string;
     description?: string;
     product_vendor_id?: number | null;
-    all_variants: SellibriVariant[];
-    taxon_ids: number[];
+    taxon_ids?: number[];
+    master_attributes?: SellibriMasterAttributes;
   };
 }
 
