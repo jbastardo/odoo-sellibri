@@ -65,6 +65,7 @@ export interface OdooProduct {
   name: string;
   default_code: string;
   list_price: number;
+  price_with_tax: number;
   qty_available: number;
   weight: number;
   barcode: string | false;
@@ -98,7 +99,7 @@ export async function fetchProducts(
   // Images are fetched individually per-product in fetchProductMainImage().
   const products = await execute('product.product', 'search_read', [domain], {
     fields: [
-      'name', 'default_code', 'list_price', 'qty_available', 'weight',
+      'name', 'default_code', 'list_price', 'price_with_tax', 'qty_available', 'weight',
       'barcode', 'categ_id', 'brand_id', 'description_sale',
       'website_description', 'product_template_image_ids',
       'write_date', 'sale_ok', 'type',
@@ -128,15 +129,16 @@ export async function fetchAllProducts(lastWriteDate?: string): Promise<OdooProd
   return all;
 }
 
-/** Lightweight fetch: only SKU + qty_available for stock sync */
-export interface StockOnlyProduct {
+/** Lightweight fetch: SKU + qty_available + price_with_tax for price/stock sync */
+export interface StockPriceProduct {
   id: number;
   default_code: string;
   qty_available: number;
+  price_with_tax: number;
 }
 
-export async function fetchStockOnly(): Promise<StockOnlyProduct[]> {
-  const all: StockOnlyProduct[] = [];
+export async function fetchStockAndPrices(): Promise<StockPriceProduct[]> {
+  const all: StockPriceProduct[] = [];
   let offset = 0;
   const batchSize = 1000;
 
@@ -144,11 +146,11 @@ export async function fetchStockOnly(): Promise<StockOnlyProduct[]> {
     const batch = await execute('product.product', 'search_read', [
       [['sale_ok', '=', true], ['type', '=', 'product'], ['default_code', '!=', false], ['default_code', '!=', '']],
     ], {
-      fields: ['default_code', 'qty_available'],
+      fields: ['default_code', 'qty_available', 'price_with_tax'],
       offset,
       limit: batchSize,
     });
-    all.push(...(batch as StockOnlyProduct[]));
+    all.push(...(batch as StockPriceProduct[]));
     if (batch.length < batchSize) break;
     offset += batchSize;
   }
@@ -243,7 +245,7 @@ export async function fetchProductBySku(sku: string): Promise<OdooProduct | null
     [['default_code', '=', sku], ['sale_ok', '=', true], ['type', '=', 'product']],
   ], {
     fields: [
-      'name', 'default_code', 'list_price', 'qty_available', 'weight',
+      'name', 'default_code', 'list_price', 'price_with_tax', 'qty_available', 'weight',
       'barcode', 'categ_id', 'brand_id', 'description_sale',
       'website_description', 'product_template_image_ids',
       'write_date', 'sale_ok', 'type',

@@ -93,6 +93,7 @@ export interface SellibriProductPayload {
     title: string;
     status?: string;
     description?: string;
+    product_vendor_id?: number | null;
     all_variants: SellibriVariant[];
     taxon_ids: number[];
   };
@@ -116,6 +117,7 @@ export interface SellibriProduct {
   title: string;
   status: string;
   description: string | null;
+  product_vendor_id: number | null;
   all_variants: SellibriVariantDetail[];
   taxon_ids?: number[];
 }

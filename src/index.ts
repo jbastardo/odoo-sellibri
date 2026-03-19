@@ -3,7 +3,7 @@ import * as cron from 'node-cron';
 import * as path from 'path';
 import { config } from './config';
 import { logger } from './logger';
-import { syncProducts, syncStock, syncSingleSku, syncPhotos, getSyncStatus } from './sync';
+import { syncProducts, syncPriceStock, syncSingleSku, syncPhotos, getSyncStatus } from './sync';
 import { handleOrderWebhook, getRecentOrders } from './webhook';
 
 const app = express();
@@ -51,9 +51,9 @@ app.post('/api/sync/stock', async (_req, res) => {
     res.json({ message: 'Sync already running' });
     return;
   }
-  res.json({ message: 'Stock sync started' });
-  syncStock().catch(err => {
-    logger.error('api', `Manual stock sync error: ${err.message}`);
+  res.json({ message: 'Price/Stock sync started' });
+  syncPriceStock().catch(err => {
+    logger.error('api', `Manual price/stock sync error: ${err.message}`);
   });
 });
 
@@ -100,11 +100,11 @@ cron.schedule('*/30 * * * *', () => {
   });
 });
 
-// Stock sync every 15 minutes
+// Price/Stock sync every 15 minutes
 cron.schedule('*/15 * * * *', () => {
-  logger.info('cron', 'Triggering scheduled stock sync');
-  syncStock().catch(err => {
-    logger.error('cron', `Scheduled stock sync error: ${err.message}`);
+  logger.info('cron', 'Triggering scheduled price/stock sync');
+  syncPriceStock().catch(err => {
+    logger.error('cron', `Scheduled price/stock sync error: ${err.message}`);
   });
 });
 

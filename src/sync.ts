@@ -5,6 +5,7 @@ import * as odoo from './odoo';
 import * as sellibri from './sellibri';
 import { config } from './config';
 import { mapCategory } from './category-map';
+import { mapBrandToVendor } from './brand-map';
 import { logger } from './logger';
 
 const MODULE = 'sync';
@@ -97,20 +98,41 @@ export function getSyncStatus(): SyncStatus {
   return { ...syncStatus };
 }
 
-// ─── Helper: Check if a Sellibri field is empty ─────────────────
+// ─── Helpers ───────────────────────────────────────────────────
 
 function isEmpty(val: any): boolean {
   if (val === null || val === undefined) return true;
   if (typeof val === 'string' && val.trim() === '') return true;
-  if (typeof val === 'string' && val === '0' || val === '0.0' || val === '0.00') return true;
+  if (val === '0' || val === '0.0' || val === '0.00') return true;
   return false;
+}
+
+/** Get the Sellibri price from Odoo: use price_with_tax directly */
+function getSellibriPrice(product: odoo.OdooProduct): string {
+  const pwt = product.price_with_tax;
+  if (pwt && pwt > 0) return pwt.toFixed(2);
+  // Fallback: calculate manually if price_with_tax not available
+  return (product.list_price * (1 + config.ivaRate)).toFixed(2);
+}
+
+function updateProgress(done: number, total: number, batchStartTime: number): void {
+  const elapsed = (Date.now() - batchStartTime) / 1000;
+  const rate = done > 0 ? elapsed / done : 1;
+  const remaining = Math.max(0, total - done);
+  syncStatus.progress = {
+    current: done,
+    total,
+    phase: `Sincronizando ${done} / ${total} productos...`,
+    startedAt: syncStatus.progress?.startedAt || new Date().toISOString(),
+    estimatedSecondsLeft: Math.round(remaining * rate),
+  };
 }
 
 // ─── Smart Product Sync (fill empty fields only) ────────────────
 
 /**
  * Build a PARTIAL update payload: only include fields that are empty in Sellibri.
- * ALWAYS include price and stock (if different).
+ * ALWAYS update price (price_with_tax from Odoo) and stock if different.
  * NEVER include images in normal sync.
  */
 function buildSmartPayload(
@@ -120,13 +142,13 @@ function buildSmartPayload(
   const variant = sellibriProduct.all_variants?.[0];
   if (!variant) return null;
 
-  const odooPrice = (odooProduct.list_price * (1 + config.ivaRate)).toFixed(2);
+  const odooPrice = getSellibriPrice(odooProduct);
   const odooStock = Math.max(0, Math.floor(odooProduct.qty_available || 0));
   const odooDescription = odooProduct.website_description || odooProduct.description_sale || '';
   const categId = Array.isArray(odooProduct.categ_id) ? odooProduct.categ_id[0] : 0;
   const taxonId = mapCategory(categId);
+  const vendorId = mapBrandToVendor(odooProduct.brand_id);
 
-  // Track what fields we're updating
   let needsUpdate = false;
   const productFields: Record<string, any> = {};
   const variantFields: Record<string, any> = {
@@ -175,6 +197,12 @@ function buildSmartPayload(
     needsUpdate = true;
   }
 
+  // Brand/Vendor: only if not set in Sellibri
+  if (!sellibriProduct.product_vendor_id && vendorId) {
+    productFields.product_vendor_id = vendorId;
+    needsUpdate = true;
+  }
+
   // Barcode: only if empty
   if (isEmpty(variant.barcode) && odooProduct.barcode) {
     variantFields.barcode = odooProduct.barcode;
@@ -194,6 +222,7 @@ function buildSmartPayload(
       title: productFields.title || sellibriProduct.title,
       status: 'active',
       ...(productFields.description !== undefined ? { description: productFields.description } : {}),
+      ...(productFields.product_vendor_id ? { product_vendor_id: productFields.product_vendor_id } : {}),
       all_variants: [variantFields as any],
       taxon_ids: productFields.taxon_ids || sellibriProduct.taxon_ids || [taxonId],
     },
@@ -202,7 +231,7 @@ function buildSmartPayload(
 
 /**
  * Build a FULL payload for creating new products or force-updating a specific SKU.
- * Includes ALL fields + images.
+ * Includes ALL fields + images. Uses price_with_tax from Odoo.
  */
 function buildFullPayload(
   odooProduct: odoo.OdooProduct,
@@ -210,10 +239,11 @@ function buildFullPayload(
   extraImages: odoo.ProductImage[],
   existingVariantId?: number,
 ): sellibri.SellibriProductPayload {
-  const price = (odooProduct.list_price * (1 + config.ivaRate)).toFixed(2);
+  const price = getSellibriPrice(odooProduct);
   const description = odooProduct.website_description || odooProduct.description_sale || '';
   const categId = Array.isArray(odooProduct.categ_id) ? odooProduct.categ_id[0] : 0;
   const taxonId = mapCategory(categId);
+  const vendorId = mapBrandToVendor(odooProduct.brand_id);
 
   const variant: sellibri.SellibriVariant = {
     price,
@@ -254,6 +284,7 @@ function buildFullPayload(
       title: odooProduct.name,
       status: 'active',
       description: typeof description === 'string' ? description : '',
+      ...(vendorId ? { product_vendor_id: vendorId } : {}),
       all_variants: [variant],
       taxon_ids: [taxonId],
     },
@@ -346,7 +377,7 @@ export async function syncProducts(): Promise<void> {
       }
 
       try {
-        // Check if product exists in Sellibri (by SKU in pre-loaded catalog)
+        // Check if product exists in Sellibri
         const existingInCatalog = sellibriCatalog.get(sku);
         const existingInState = cached?.sellibriId ? cached : null;
         const existingSellibriId = existingInCatalog?.id || existingInState?.sellibriId;
@@ -356,10 +387,9 @@ export async function syncProducts(): Promise<void> {
         let variantId: number;
 
         if (existingSellibriId && existingVariantId) {
-          // ── EXISTING PRODUCT: smart update (only empty fields + always price/qty) ──
+          // ── EXISTING: smart update (only empty fields + always price/qty) ──
           const sellibriProduct = existingInCatalog || await sellibri.fetchProductById(existingSellibriId);
           if (!sellibriProduct) {
-            // Product was deleted from Sellibri — skip, don't recreate
             logger.warn(MODULE, `SKU=${sku}: Sellibri product ${existingSellibriId} not found, skipping`);
             skipped++;
             updateProgress(synced + created + skipped + errors, total, batchStartTime);
@@ -371,13 +401,13 @@ export async function syncProducts(): Promise<void> {
             await sellibri.updateProduct(existingSellibriId, payload);
             synced++;
           } else {
-            skipped++; // No changes needed
+            skipped++;
           }
 
           sellibriId = existingSellibriId;
           variantId = existingVariantId;
         } else {
-          // ── NEW PRODUCT: create with all fields + images ──
+          // ── NEW: create with all fields + images ──
           const mainImage = await odoo.fetchProductMainImage(product.id);
           let extraImages: odoo.ProductImage[] = [];
           if (product.product_template_image_ids?.length > 0) {
@@ -392,7 +422,7 @@ export async function syncProducts(): Promise<void> {
           logger.info(MODULE, `Created SKU=${sku} in Sellibri (id=${sellibriId})`);
         }
 
-        const odooPrice = (product.list_price * (1 + config.ivaRate)).toFixed(2);
+        const odooPrice = getSellibriPrice(product);
         state.products[sku] = {
           sellibriId,
           sellibriVariantId: variantId,
@@ -412,7 +442,6 @@ export async function syncProducts(): Promise<void> {
 
       updateProgress(synced + created + skipped + errors, total, batchStartTime);
 
-      // Save state every 100 products
       const done = synced + created + skipped + errors;
       if (done % 100 === 0) {
         saveState(state);
@@ -420,7 +449,6 @@ export async function syncProducts(): Promise<void> {
       }
     });
 
-    // Execute with concurrency of 3
     await sellibri.batchExecute(tasks, 3);
 
     if (maxWriteDate) {
@@ -444,26 +472,12 @@ export async function syncProducts(): Promise<void> {
   }
 }
 
-function updateProgress(done: number, total: number, batchStartTime: number): void {
-  const elapsed = (Date.now() - batchStartTime) / 1000;
-  const rate = done > 0 ? elapsed / done : 1;
-  const remaining = Math.max(0, total - done);
-  syncStatus.progress = {
-    current: done,
-    total,
-    phase: `Sincronizando ${done} / ${total} productos...`,
-    startedAt: syncStatus.progress?.startedAt || new Date().toISOString(),
-    estimatedSecondsLeft: Math.round(remaining * rate),
-  };
-}
-
 // ─── Force Sync Single SKU (all fields + images) ──────────────
 
 export async function syncSingleSku(sku: string): Promise<{ success: boolean; message: string }> {
   logger.info(MODULE, `Force sync SKU=${sku}...`);
 
   try {
-    // Find product in Odoo by SKU (efficient single lookup)
     const odooProduct = await odoo.fetchProductBySku(sku);
 
     if (!odooProduct) {
@@ -493,7 +507,6 @@ export async function syncSingleSku(sku: string): Promise<{ success: boolean; me
     let variantId: number;
 
     if (existingProduct) {
-      // Update with ALL fields (force mode)
       const existingVariantId = existingProduct.all_variants?.[0]?.id;
       const payload = buildFullPayload(odooProduct, mainImage, extraImages, existingVariantId);
       await sellibri.updateProduct(existingProduct.id, payload);
@@ -501,7 +514,6 @@ export async function syncSingleSku(sku: string): Promise<{ success: boolean; me
       variantId = existingVariantId || 0;
       logger.info(MODULE, `Force-updated SKU=${sku} in Sellibri (id=${sellibriId})`);
     } else {
-      // Create new
       const payload = buildFullPayload(odooProduct, mainImage, extraImages);
       const newProduct = await sellibri.createProduct(payload);
       sellibriId = newProduct.id;
@@ -509,7 +521,7 @@ export async function syncSingleSku(sku: string): Promise<{ success: boolean; me
       logger.info(MODULE, `Force-created SKU=${sku} in Sellibri (id=${sellibriId})`);
     }
 
-    const odooPrice = (odooProduct.list_price * (1 + config.ivaRate)).toFixed(2);
+    const odooPrice = getSellibriPrice(odooProduct);
     state.products[sku] = {
       sellibriId,
       sellibriVariantId: variantId,
@@ -524,7 +536,7 @@ export async function syncSingleSku(sku: string): Promise<{ success: boolean; me
     return {
       success: true,
       message: existingProduct
-        ? `SKU ${sku} actualizado en Sellibri (todos los campos + fotos)`
+        ? `SKU ${sku} actualizado (todos los campos + fotos)`
         : `SKU ${sku} creado en Sellibri`,
     };
   } catch (err: any) {
@@ -551,7 +563,6 @@ export async function syncPhotos(): Promise<void> {
   const syncStartTime = Date.now();
 
   try {
-    // Load Sellibri catalog to check which products have images
     syncStatus.progress = {
       current: 0, total: 0,
       phase: 'Verificando fotos en Sellibri...',
@@ -567,8 +578,6 @@ export async function syncPhotos(): Promise<void> {
 
     logger.info(MODULE, `Photo sync: checking ${trackedSkus.length} tracked products`);
 
-    // We need to check each product's images in Sellibri
-    // Load Sellibri catalog (has image info in variants)
     const sellibriCatalog = await sellibri.fetchAllProducts();
 
     // Find products without images
@@ -584,7 +593,6 @@ export async function syncPhotos(): Promise<void> {
       const variant = sellibriProduct.all_variants?.[0];
       if (!variant) continue;
 
-      // Check if variant has images
       const hasImages = variant.images && variant.images.length > 0;
       if (!hasImages) {
         needsPhotos.push({
@@ -627,7 +635,6 @@ export async function syncPhotos(): Promise<void> {
           return;
         }
 
-        // Fetch main image from Odoo
         const mainImage = await odoo.fetchProductMainImage(odooProduct.id);
         if (!mainImage) {
           skipped++;
@@ -635,13 +642,11 @@ export async function syncPhotos(): Promise<void> {
           return;
         }
 
-        // Fetch extra images
         let extraImages: odoo.ProductImage[] = [];
         if (odooProduct.product_template_image_ids?.length > 0) {
           extraImages = await odoo.fetchProductImages(odooProduct.product_template_image_ids);
         }
 
-        // Build images array
         const images: { image: string }[] = [{ image: mainImage }];
         for (const img of extraImages) {
           if (img.image_1920 && typeof img.image_1920 === 'string') {
@@ -649,7 +654,7 @@ export async function syncPhotos(): Promise<void> {
           }
         }
 
-        // Update Sellibri variant with images only — fetch current data to preserve fields
+        // Preserve existing product data while adding images
         const currentProduct = sellibriCatalog.get(item.sku);
         const currentVariant = currentProduct?.all_variants?.[0];
         await sellibri.updateProduct(item.sellibriId, {
@@ -658,7 +663,7 @@ export async function syncPhotos(): Promise<void> {
             all_variants: [{
               id: item.variantId,
               sku: item.sku,
-              price: currentVariant?.price || '0',
+              price: currentVariant?.price || getSellibriPrice(odooProduct),
               track_inventory: true,
               tax_rate_id: config.sellibri.taxRateId,
               images,
@@ -693,9 +698,7 @@ export async function syncPhotos(): Promise<void> {
       }
     });
 
-    // Use concurrency of 2 (images are heavy)
     await sellibri.batchExecute(tasks, 2);
-
     saveState(state);
 
     const totalTime = ((Date.now() - syncStartTime) / 1000).toFixed(1);
@@ -710,11 +713,11 @@ export async function syncPhotos(): Promise<void> {
   }
 }
 
-// ─── Stock Sync (Lightweight) ──────────────────────────────────
+// ─── Precio/Stock Sync (price_with_tax + qty_available) ────────
 
-export async function syncStock(): Promise<void> {
+export async function syncPriceStock(): Promise<void> {
   if (stockSyncRunning) {
-    logger.warn(MODULE, 'Stock sync already running, skipping');
+    logger.warn(MODULE, 'Price/Stock sync already running, skipping');
     return;
   }
   stockSyncRunning = true;
@@ -722,36 +725,42 @@ export async function syncStock(): Promise<void> {
   syncStatus.lastError = null;
 
   const state = loadState();
-  let synced = 0;
+  let priceUpdated = 0;
+  let stockUpdated = 0;
   let skipped = 0;
   let errors = 0;
 
   try {
     const trackedSkus = Object.keys(state.products);
     if (trackedSkus.length === 0) {
-      logger.info(MODULE, 'No products tracked yet, skipping stock sync');
+      logger.info(MODULE, 'No products tracked yet, skipping price/stock sync');
       return;
     }
 
-    logger.info(MODULE, `Starting stock sync for ${trackedSkus.length} tracked products`);
+    logger.info(MODULE, `Starting price/stock sync for ${trackedSkus.length} tracked products`);
 
     syncStatus.progress = {
       current: 0, total: trackedSkus.length,
-      phase: 'Obteniendo stock de Odoo...',
+      phase: 'Obteniendo precio/stock de Odoo...',
       startedAt: new Date().toISOString(),
       estimatedSecondsLeft: null,
     };
 
-    const products = await odoo.fetchStockOnly();
+    // Fetch stock + price from Odoo (lightweight, no images)
+    const products = await odoo.fetchStockAndPrices();
 
-    const odooStockMap = new Map<string, number>();
+    // Build SKU → { qty, price } map
+    const odooDataMap = new Map<string, { qty: number; price: string }>();
     for (const p of products) {
       if (p.default_code) {
-        odooStockMap.set(p.default_code, Math.max(0, Math.floor(p.qty_available || 0)));
+        odooDataMap.set(p.default_code, {
+          qty: Math.max(0, Math.floor(p.qty_available || 0)),
+          price: p.price_with_tax > 0 ? p.price_with_tax.toFixed(2) : '0.00',
+        });
       }
     }
 
-    logger.info(MODULE, `Odoo stock fetched: ${odooStockMap.size} products`);
+    logger.info(MODULE, `Odoo price/stock fetched: ${odooDataMap.size} products`);
 
     const tasks: (() => Promise<void>)[] = [];
 
@@ -759,38 +768,74 @@ export async function syncStock(): Promise<void> {
       const cached = state.products[sku];
       if (!cached?.sellibriVariantId) continue;
 
-      const currentStock = odooStockMap.get(sku);
-      if (currentStock === undefined) continue;
+      const odooData = odooDataMap.get(sku);
+      if (!odooData) continue;
 
-      if (cached.lastStock !== undefined && cached.lastStock === currentStock) {
+      const stockChanged = cached.lastStock === undefined || cached.lastStock !== odooData.qty;
+      const priceChanged = !cached.lastPrice || cached.lastPrice !== odooData.price;
+
+      if (!stockChanged && !priceChanged) {
         skipped++;
         continue;
       }
 
       tasks.push(async () => {
         try {
-          await sellibri.updateVariantStock(
-            cached.sellibriVariantId,
-            config.sellibri.stockLocationId,
-            currentStock,
-          );
-          state.products[sku].lastStock = currentStock;
-          synced++;
+          // Build variant update with both price and stock
+          const variantUpdate: any = {
+            variant: {},
+          };
+
+          if (priceChanged) {
+            variantUpdate.variant.price = odooData.price;
+          }
+
+          if (stockChanged) {
+            variantUpdate.variant.stock_items = [{
+              stock_location_id: config.sellibri.stockLocationId,
+              available: odooData.qty,
+            }];
+          }
+
+          // Use updateProduct to update the variant's price+stock together
+          await sellibri.updateProduct(cached.sellibriId, {
+            product: {
+              title: '', // Will be ignored on PATCH
+              all_variants: [{
+                id: cached.sellibriVariantId,
+                sku,
+                price: odooData.price,
+                track_inventory: true,
+                tax_rate_id: config.sellibri.taxRateId,
+                stock_items: [{
+                  stock_location_id: config.sellibri.stockLocationId,
+                  available: odooData.qty,
+                }],
+              }],
+              taxon_ids: [],
+            },
+          });
+
+          if (priceChanged) priceUpdated++;
+          if (stockChanged) stockUpdated++;
+
+          state.products[sku].lastStock = odooData.qty;
+          state.products[sku].lastPrice = odooData.price;
         } catch (err: any) {
           errors++;
-          logger.error(MODULE, `Stock error SKU=${sku}: ${err.message}`);
+          logger.error(MODULE, `Price/Stock error SKU=${sku}: ${err.message}`);
         }
       });
     }
 
     if (tasks.length === 0) {
-      logger.info(MODULE, `No stock changes detected (${skipped} unchanged)`);
+      logger.info(MODULE, `No price/stock changes detected (${skipped} unchanged)`);
     } else {
-      logger.info(MODULE, `${tasks.length} products need stock update, ${skipped} unchanged`);
+      logger.info(MODULE, `${tasks.length} products need price/stock update, ${skipped} unchanged`);
 
       syncStatus.progress = {
         current: 0, total: tasks.length,
-        phase: `Actualizando stock: 0 / ${tasks.length}...`,
+        phase: `Actualizando precio/stock: 0 / ${tasks.length}...`,
         startedAt: new Date().toISOString(),
         estimatedSecondsLeft: null,
       };
@@ -802,10 +847,10 @@ export async function syncStock(): Promise<void> {
     saveState(state);
 
     syncStatus.lastStockSync = state.lastStockSync;
-    logger.info(MODULE, `Stock sync complete: ${synced} updated, ${skipped} unchanged, ${errors} errors`);
+    logger.info(MODULE, `Price/Stock sync complete: ${priceUpdated} prices updated, ${stockUpdated} stock updated, ${skipped} unchanged, ${errors} errors`);
   } catch (err: any) {
     syncStatus.lastError = err.message;
-    logger.error(MODULE, `Stock sync failed: ${err.message}`);
+    logger.error(MODULE, `Price/Stock sync failed: ${err.message}`);
   } finally {
     stockSyncRunning = false;
     syncStatus.isRunning = productSyncRunning;
