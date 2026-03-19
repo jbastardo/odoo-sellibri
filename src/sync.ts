@@ -783,8 +783,7 @@ export async function syncPriceStock(): Promise<void> {
 
           await sellibri.updateProduct(cached.sellibriId, {
             product: {
-              title: '', // Ignored on PATCH
-              status: 'active', // Always ensure visible
+              status: 'active',
               master_attributes: masterAttrs,
             },
           });

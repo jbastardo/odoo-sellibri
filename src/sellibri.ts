@@ -127,7 +127,7 @@ export interface SellibriMasterAttributes {
 
 export interface SellibriProductPayload {
   product: {
-    title: string;
+    title?: string;
     slug?: string;
     status?: string;
     description?: string;
