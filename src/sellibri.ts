@@ -50,7 +50,9 @@ const client: AxiosInstance = axios.create({
     'X-Api-Key': config.sellibri.apiKey,
     'Content-Type': 'application/json',
   },
-  timeout: 30_000,
+  timeout: 60_000,
+  maxBodyLength: Infinity,
+  maxContentLength: Infinity,
 });
 
 async function apiGet<T = any>(path: string, params?: Record<string, any>): Promise<T> {
@@ -99,12 +101,40 @@ export interface SellibriProductPayload {
 export interface SellibriProduct {
   id: number;
   title: string;
+  status: string;
   all_variants: {
     id: number;
     sku: string;
     price: string;
     stock_items: { id: number; stock_location_id: number; available: number }[];
   }[];
+}
+
+/** Fetch ALL products from Sellibri with pagination. Builds SKU→product map. */
+export async function fetchAllProducts(): Promise<Map<string, SellibriProduct>> {
+  const map = new Map<string, SellibriProduct>();
+  let page = 1;
+  const perPage = 250;
+
+  while (true) {
+    const data = await apiGet('/products', { per_page: perPage, page });
+    const products: SellibriProduct[] = data.products || [];
+    if (products.length === 0) break;
+
+    for (const p of products) {
+      for (const v of p.all_variants || []) {
+        if (v.sku) {
+          map.set(v.sku, p);
+        }
+      }
+    }
+
+    logger.info(MODULE, `Loaded Sellibri catalog page ${page} (${products.length} products, ${map.size} SKUs total)`);
+    if (products.length < perPage) break;
+    page++;
+  }
+
+  return map;
 }
 
 export async function findProductBySku(sku: string): Promise<SellibriProduct | null> {
@@ -131,23 +161,41 @@ export async function updateProduct(id: number, payload: SellibriProductPayload)
   return data.product || data;
 }
 
-export async function updateStockItem(
-  productId: number,
+export async function updateVariantStock(
   variantId: number,
   stockLocationId: number,
   available: number,
 ): Promise<void> {
-  // Try to update stock via the product variant's stock items
-  const payload = {
-    product: {
-      all_variants: [{
-        id: variantId,
-        stock_items: [{
-          stock_location_id: stockLocationId,
-          available: Math.max(0, Math.floor(available)),
-        }],
+  await apiPatch(`/variants/${variantId}`, {
+    variant: {
+      stock_items: [{
+        stock_location_id: stockLocationId,
+        available: Math.max(0, Math.floor(available)),
       }],
     },
-  };
-  await apiPatch(`/products/${productId}`, payload);
+  });
+}
+
+/** Batch execute promises with concurrency limit, respecting rate limiter */
+export async function batchExecute<T>(
+  tasks: (() => Promise<T>)[],
+  concurrency: number = 3,
+): Promise<(T | Error)[]> {
+  const results: (T | Error)[] = new Array(tasks.length);
+  let index = 0;
+
+  async function worker() {
+    while (index < tasks.length) {
+      const i = index++;
+      try {
+        results[i] = await tasks[i]();
+      } catch (err: any) {
+        results[i] = err instanceof Error ? err : new Error(String(err));
+      }
+    }
+  }
+
+  const workers = Array.from({ length: Math.min(concurrency, tasks.length) }, () => worker());
+  await Promise.all(workers);
+  return results;
 }

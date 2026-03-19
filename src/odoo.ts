@@ -112,7 +112,7 @@ export async function fetchProducts(
 export async function fetchAllProducts(lastWriteDate?: string): Promise<OdooProduct[]> {
   const all: OdooProduct[] = [];
   let offset = 0;
-  const batchSize = 200;
+  const batchSize = 500;
 
   while (true) {
     logger.info(MODULE, `Fetching products offset=${offset} limit=${batchSize}`);
@@ -123,6 +123,34 @@ export async function fetchAllProducts(lastWriteDate?: string): Promise<OdooProd
   }
 
   logger.info(MODULE, `Fetched ${all.length} products total`);
+  return all;
+}
+
+/** Lightweight fetch: only SKU + qty_available for stock sync */
+export interface StockOnlyProduct {
+  id: number;
+  default_code: string;
+  qty_available: number;
+}
+
+export async function fetchStockOnly(): Promise<StockOnlyProduct[]> {
+  const all: StockOnlyProduct[] = [];
+  let offset = 0;
+  const batchSize = 1000;
+
+  while (true) {
+    const batch = await execute('product.product', 'search_read', [
+      [['sale_ok', '=', true], ['type', '=', 'product'], ['default_code', '!=', false], ['default_code', '!=', '']],
+    ], {
+      fields: ['default_code', 'qty_available'],
+      offset,
+      limit: batchSize,
+    });
+    all.push(...(batch as StockOnlyProduct[]));
+    if (batch.length < batchSize) break;
+    offset += batchSize;
+  }
+
   return all;
 }
 

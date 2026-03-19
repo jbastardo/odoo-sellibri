@@ -1,77 +1,93 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="es">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Odoo ↔ Sellibri Integration</title>
+  <title>Odoo ↔ Sellibri — ONPROTEC</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <style>
     .log-info { color: #3b82f6; }
     .log-warn { color: #f59e0b; }
     .log-error { color: #ef4444; }
+    @keyframes pulse-bar { 0%,100% { opacity: 1; } 50% { opacity: .6; } }
+    .pulse-bar { animation: pulse-bar 1.5s ease-in-out infinite; }
   </style>
 </head>
 <body class="bg-gray-900 text-gray-100 min-h-screen">
   <div class="max-w-6xl mx-auto p-6">
     <header class="mb-8">
       <h1 class="text-3xl font-bold">Odoo ↔ Sellibri</h1>
-      <p class="text-gray-400 mt-1">ONPROTEC Integration Dashboard</p>
+      <p class="text-gray-400 mt-1">ONPROTEC — Integration Dashboard</p>
     </header>
+
+    <!-- Progress Banner (shown during sync) -->
+    <div id="progress-banner" class="hidden mb-6 bg-blue-900/40 border border-blue-700 rounded-lg p-4">
+      <div class="flex items-center justify-between mb-2">
+        <span id="progress-phase" class="text-sm font-medium text-blue-200">Sincronizando...</span>
+        <span id="progress-eta" class="text-xs text-blue-300"></span>
+      </div>
+      <div class="w-full bg-gray-700 rounded-full h-3">
+        <div id="progress-bar" class="bg-blue-500 h-3 rounded-full transition-all duration-500 pulse-bar" style="width: 0%"></div>
+      </div>
+      <div id="progress-detail" class="text-xs text-blue-300 mt-1"></div>
+    </div>
 
     <!-- Status Cards -->
     <div class="grid grid-cols-1 md:grid-cols-4 gap-4 mb-8">
       <div class="bg-gray-800 rounded-lg p-4">
-        <div class="text-sm text-gray-400">Products Synced</div>
+        <div class="text-sm text-gray-400">Productos sincronizados</div>
         <div id="products-synced" class="text-2xl font-bold mt-1">—</div>
       </div>
       <div class="bg-gray-800 rounded-lg p-4">
-        <div class="text-sm text-gray-400">Last Product Sync</div>
+        <div class="text-sm text-gray-400">Última sync productos</div>
         <div id="last-product-sync" class="text-sm font-mono mt-1">—</div>
       </div>
       <div class="bg-gray-800 rounded-lg p-4">
-        <div class="text-sm text-gray-400">Last Stock Sync</div>
+        <div class="text-sm text-gray-400">Última sync stock</div>
         <div id="last-stock-sync" class="text-sm font-mono mt-1">—</div>
       </div>
       <div class="bg-gray-800 rounded-lg p-4">
-        <div class="text-sm text-gray-400">Status</div>
+        <div class="text-sm text-gray-400">Estado</div>
         <div id="sync-status" class="text-lg font-bold mt-1">—</div>
       </div>
     </div>
 
     <!-- Action Buttons -->
     <div class="flex gap-3 mb-8">
-      <button onclick="triggerSync('products')" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg font-medium transition">
-        Sync Products
+      <button onclick="triggerSync('products')" id="btn-products"
+        class="bg-blue-600 hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed text-white px-4 py-2 rounded-lg font-medium transition">
+        Sincronizar Productos
       </button>
-      <button onclick="triggerSync('stock')" class="bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded-lg font-medium transition">
-        Sync Stock
+      <button onclick="triggerSync('stock')" id="btn-stock"
+        class="bg-green-600 hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed text-white px-4 py-2 rounded-lg font-medium transition">
+        Sincronizar Stock
       </button>
       <button onclick="fetchStatus()" class="bg-gray-700 hover:bg-gray-600 text-white px-4 py-2 rounded-lg font-medium transition">
-        Refresh
+        Refrescar
       </button>
     </div>
 
     <!-- Error Display -->
     <div id="error-banner" class="hidden bg-red-900/50 border border-red-700 rounded-lg p-4 mb-8">
-      <div class="font-medium text-red-300">Last Error</div>
+      <div class="font-medium text-red-300">Último error</div>
       <div id="error-text" class="text-sm text-red-200 mt-1 font-mono"></div>
     </div>
 
     <!-- Recent Orders -->
     <div class="mb-8">
-      <h2 class="text-xl font-semibold mb-3">Recent Orders</h2>
+      <h2 class="text-xl font-semibold mb-3">Pedidos recientes</h2>
       <div class="bg-gray-800 rounded-lg overflow-hidden">
         <table class="w-full text-sm">
           <thead class="bg-gray-700">
             <tr>
-              <th class="text-left p-3">Time</th>
-              <th class="text-left p-3">Order</th>
-              <th class="text-left p-3">Status</th>
+              <th class="text-left p-3">Fecha</th>
+              <th class="text-left p-3">Pedido</th>
+              <th class="text-left p-3">Estado</th>
               <th class="text-left p-3">Error</th>
             </tr>
           </thead>
           <tbody id="orders-table">
-            <tr><td colspan="4" class="p-3 text-gray-500">No orders yet</td></tr>
+            <tr><td colspan="4" class="p-3 text-gray-500">Sin pedidos aún</td></tr>
           </tbody>
         </table>
       </div>
@@ -79,9 +95,9 @@
 
     <!-- Logs -->
     <div>
-      <h2 class="text-xl font-semibold mb-3">Sync Logs</h2>
+      <h2 class="text-xl font-semibold mb-3">Logs de sincronización</h2>
       <div class="bg-gray-800 rounded-lg p-4 max-h-96 overflow-y-auto font-mono text-xs" id="logs-container">
-        <div class="text-gray-500">Loading...</div>
+        <div class="text-gray-500">Cargando...</div>
       </div>
     </div>
   </div>
@@ -89,41 +105,72 @@
   <script>
     function formatDate(iso) {
       if (!iso) return '—';
-      const d = new Date(iso);
-      return d.toLocaleString();
+      return new Date(iso).toLocaleString('es-VE', { timeZone: 'America/Caracas' });
+    }
+
+    function formatEta(seconds) {
+      if (!seconds || seconds <= 0) return '';
+      if (seconds < 60) return `~${seconds}s restantes`;
+      const min = Math.floor(seconds / 60);
+      const sec = seconds % 60;
+      return `~${min}m ${sec}s restantes`;
     }
 
     async function fetchStatus() {
       try {
         const resp = await fetch('/api/status');
         const data = await resp.json();
+        const sync = data.sync;
 
-        // Sync status
-        document.getElementById('products-synced').textContent = data.sync.productsSynced || 0;
-        document.getElementById('last-product-sync').textContent = formatDate(data.sync.lastProductSync);
-        document.getElementById('last-stock-sync').textContent = formatDate(data.sync.lastStockSync);
+        // Cards
+        document.getElementById('products-synced').textContent = sync.productsSynced || 0;
+        document.getElementById('last-product-sync').textContent = formatDate(sync.lastProductSync);
+        document.getElementById('last-stock-sync').textContent = formatDate(sync.lastStockSync);
 
         const statusEl = document.getElementById('sync-status');
-        if (data.sync.isRunning) {
-          statusEl.textContent = 'Running';
+        const btnProducts = document.getElementById('btn-products');
+        const btnStock = document.getElementById('btn-stock');
+
+        if (sync.isRunning) {
+          statusEl.textContent = 'Sincronizando...';
           statusEl.className = 'text-lg font-bold mt-1 text-yellow-400';
+          btnProducts.disabled = true;
+          btnStock.disabled = true;
         } else {
-          statusEl.textContent = 'Idle';
+          statusEl.textContent = 'Inactivo';
           statusEl.className = 'text-lg font-bold mt-1 text-green-400';
+          btnProducts.disabled = false;
+          btnStock.disabled = false;
+        }
+
+        // Progress bar
+        const banner = document.getElementById('progress-banner');
+        if (sync.progress && sync.isRunning) {
+          banner.classList.remove('hidden');
+          document.getElementById('progress-phase').textContent = sync.progress.phase;
+          const pct = sync.progress.total > 0
+            ? Math.round((sync.progress.current / sync.progress.total) * 100)
+            : 0;
+          document.getElementById('progress-bar').style.width = pct + '%';
+          document.getElementById('progress-detail').textContent =
+            `${sync.progress.current.toLocaleString()} / ${sync.progress.total.toLocaleString()} (${pct}%)`;
+          document.getElementById('progress-eta').textContent = formatEta(sync.progress.estimatedSecondsLeft);
+        } else {
+          banner.classList.add('hidden');
         }
 
         // Error
         const errorBanner = document.getElementById('error-banner');
-        if (data.sync.lastError) {
+        if (sync.lastError) {
           errorBanner.classList.remove('hidden');
-          document.getElementById('error-text').textContent = data.sync.lastError;
+          document.getElementById('error-text').textContent = sync.lastError;
         } else {
           errorBanner.classList.add('hidden');
         }
 
         // Orders
         const ordersTable = document.getElementById('orders-table');
-        if (data.recentOrders && data.recentOrders.length > 0) {
+        if (data.recentOrders?.length > 0) {
           ordersTable.innerHTML = data.recentOrders.reverse().map(o => `
             <tr class="border-t border-gray-700">
               <td class="p-3">${formatDate(o.timestamp)}</td>
@@ -139,37 +186,36 @@
             </tr>
           `).join('');
         } else {
-          ordersTable.innerHTML = '<tr><td colspan="4" class="p-3 text-gray-500">No orders yet</td></tr>';
+          ordersTable.innerHTML = '<tr><td colspan="4" class="p-3 text-gray-500">Sin pedidos aún</td></tr>';
         }
 
         // Logs
         const logsContainer = document.getElementById('logs-container');
-        if (data.logs && data.logs.length > 0) {
+        if (data.logs?.length > 0) {
           logsContainer.innerHTML = data.logs.reverse().map(l =>
-            `<div class="log-${l.level}"><span class="text-gray-500">${l.timestamp}</span> [${l.module}] ${l.message}</div>`
+            `<div class="log-${l.level}"><span class="text-gray-500">${l.timestamp.replace('T',' ').slice(0,19)}</span> [${l.module}] ${l.message}</div>`
           ).join('');
         } else {
-          logsContainer.innerHTML = '<div class="text-gray-500">No logs yet</div>';
+          logsContainer.innerHTML = '<div class="text-gray-500">Sin logs aún</div>';
         }
       } catch (err) {
-        console.error('Failed to fetch status:', err);
+        console.error('Error:', err);
       }
     }
 
     async function triggerSync(type) {
       try {
-        const resp = await fetch(`/api/sync/${type}`, { method: 'POST' });
-        const data = await resp.json();
-        alert(data.message);
-        setTimeout(fetchStatus, 2000);
+        document.getElementById('btn-products').disabled = true;
+        document.getElementById('btn-stock').disabled = true;
+        await fetch(`/api/sync/${type}`, { method: 'POST' });
+        setTimeout(fetchStatus, 1000);
       } catch (err) {
-        alert('Failed to trigger sync: ' + err.message);
+        alert('Error: ' + err.message);
       }
     }
 
-    // Initial load and auto-refresh
     fetchStatus();
-    setInterval(fetchStatus, 15000);
+    setInterval(fetchStatus, 5000); // Refresh every 5s (faster during sync)
   </script>
 </body>
 </html>
