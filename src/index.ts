@@ -3,7 +3,7 @@ import * as cron from 'node-cron';
 import * as path from 'path';
 import { config } from './config';
 import { logger } from './logger';
-import { syncProducts, syncPriceStock, syncSingleSku, syncPhotos, getSyncStatus } from './sync';
+import { syncProducts, syncPriceStock, syncSingleSku, syncPhotos, getSyncStatus, requestAbort } from './sync';
 import { handleOrderWebhook, getRecentOrders } from './webhook';
 
 const app = express();
@@ -79,6 +79,15 @@ app.post('/api/sync/photos', async (_req, res) => {
   res.json({ message: 'Photo sync started' });
   syncPhotos().catch(err => {
     logger.error('api', `Photo sync error: ${err.message}`);
+  });
+});
+
+// Abort sync
+app.post('/api/sync/abort', (_req, res) => {
+  const aborted = requestAbort();
+  res.json({
+    success: aborted,
+    message: aborted ? 'Sincronización detenida' : 'No hay sincronización en curso',
   });
 });
 

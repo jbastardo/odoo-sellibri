@@ -66,6 +66,10 @@
         class="bg-purple-600 hover:bg-purple-700 disabled:opacity-50 disabled:cursor-not-allowed text-white px-4 py-2 rounded-lg font-medium transition">
         🖼️ Sync Fotos
       </button>
+      <button onclick="abortSync()" id="btn-abort"
+        class="hidden bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-lg font-medium transition">
+        ⛔ Detener
+      </button>
       <button onclick="fetchStatus()" class="bg-gray-700 hover:bg-gray-600 text-white px-4 py-2 rounded-lg font-medium transition">
         Refrescar
       </button>
@@ -147,6 +151,7 @@
         const btnProducts = document.getElementById('btn-products');
         const btnStock = document.getElementById('btn-stock');
         const btnPhotos = document.getElementById('btn-photos');
+        const btnAbort = document.getElementById('btn-abort');
 
         if (sync.isRunning) {
           statusEl.textContent = 'Sincronizando...';
@@ -154,12 +159,14 @@
           btnProducts.disabled = true;
           btnStock.disabled = true;
           btnPhotos.disabled = true;
+          btnAbort.classList.remove('hidden');
         } else {
           statusEl.textContent = 'Inactivo';
           statusEl.className = 'text-lg font-bold mt-1 text-green-400';
           btnProducts.disabled = false;
           btnStock.disabled = false;
           btnPhotos.disabled = false;
+          btnAbort.classList.add('hidden');
         }
 
         // Progress bar
@@ -279,6 +286,21 @@
       } finally {
         btn.disabled = false;
         setTimeout(fetchStatus, 1000);
+      }
+    }
+
+    async function abortSync() {
+      try {
+        const resp = await fetch('/api/sync/abort', { method: 'POST' });
+        const data = await resp.json();
+        const statusEl = document.getElementById('sync-status');
+        if (data.success) {
+          statusEl.textContent = 'Deteniendo...';
+          statusEl.className = 'text-lg font-bold mt-1 text-red-400';
+        }
+        setTimeout(fetchStatus, 2000);
+      } catch (err) {
+        alert('Error: ' + err.message);
       }
     }
 

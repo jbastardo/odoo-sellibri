@@ -93,9 +93,18 @@ let syncStatus: SyncStatus = {
 
 let productSyncRunning = false;
 let stockSyncRunning = false;
+let abortRequested = false;
 
 export function getSyncStatus(): SyncStatus {
   return { ...syncStatus };
+}
+
+/** Request cancellation of the current sync */
+export function requestAbort(): boolean {
+  if (!syncStatus.isRunning) return false;
+  abortRequested = true;
+  logger.warn(MODULE, 'Abort requested — sync will stop after current batch');
+  return true;
 }
 
 // ─── Helpers ───────────────────────────────────────────────────
@@ -365,6 +374,11 @@ export async function syncProducts(): Promise<void> {
     const batchStartTime = Date.now();
 
     const tasks: (() => Promise<void>)[] = products.map((product) => async () => {
+      // Check abort flag
+      if (abortRequested) {
+        return;
+      }
+
       const sku = product.default_code;
       if (!sku) return;
 
@@ -377,11 +391,23 @@ export async function syncProducts(): Promise<void> {
       }
 
       try {
-        // Check if product exists in Sellibri
-        const existingInCatalog = sellibriCatalog.get(sku);
+        // Step 1: Check pre-loaded catalog + state
+        let existingInCatalog = sellibriCatalog.get(sku);
         const existingInState = cached?.sellibriId ? cached : null;
-        const existingSellibriId = existingInCatalog?.id || existingInState?.sellibriId;
-        const existingVariantId = existingInCatalog?.all_variants?.[0]?.id || existingInState?.sellibriVariantId;
+        let existingSellibriId = existingInCatalog?.id || existingInState?.sellibriId;
+        let existingVariantId = existingInCatalog?.all_variants?.[0]?.id || existingInState?.sellibriVariantId;
+
+        // Step 2: If not found in catalog/state, search Sellibri API by SKU
+        // This prevents creating duplicates when catalog didn't load the product
+        if (!existingSellibriId) {
+          const found = await sellibri.findProductBySku(sku);
+          if (found) {
+            existingSellibriId = found.id;
+            existingVariantId = found.all_variants?.[0]?.id || 0;
+            existingInCatalog = found;
+            logger.info(MODULE, `SKU=${sku}: found in Sellibri via API search (id=${found.id})`);
+          }
+        }
 
         let sellibriId: number;
         let variantId: number;
@@ -407,7 +433,7 @@ export async function syncProducts(): Promise<void> {
           sellibriId = existingSellibriId;
           variantId = existingVariantId;
         } else {
-          // ── NEW: create with all fields + images ──
+          // ── NEW: product truly doesn't exist in Sellibri — create it ──
           const mainImage = await odoo.fetchProductMainImage(product.id);
           let extraImages: odoo.ProductImage[] = [];
           if (product.product_template_image_ids?.length > 0) {
@@ -461,12 +487,17 @@ export async function syncProducts(): Promise<void> {
     syncStatus.productsSynced = Object.keys(state.products).length;
 
     const totalTime = ((Date.now() - syncStartTime) / 1000).toFixed(1);
-    logger.info(MODULE, `Product sync complete in ${totalTime}s: ${created} created, ${synced} updated, ${skipped} skipped, ${errors} errors`);
+    if (abortRequested) {
+      logger.warn(MODULE, `Product sync ABORTED after ${totalTime}s: ${created} created, ${synced} updated, ${skipped} skipped, ${errors} errors`);
+    } else {
+      logger.info(MODULE, `Product sync complete in ${totalTime}s: ${created} created, ${synced} updated, ${skipped} skipped, ${errors} errors`);
+    }
   } catch (err: any) {
     syncStatus.lastError = err.message;
     logger.error(MODULE, `Product sync failed: ${err.message}`);
   } finally {
     productSyncRunning = false;
+    abortRequested = false;
     syncStatus.isRunning = stockSyncRunning;
     syncStatus.progress = null;
   }
@@ -628,6 +659,7 @@ export async function syncPhotos(): Promise<void> {
     const batchStartTime = Date.now();
 
     const tasks: (() => Promise<void>)[] = needsPhotos.map((item) => async () => {
+      if (abortRequested) return;
       try {
         const odooProduct = odooBysku.get(item.sku);
         if (!odooProduct) {
@@ -708,6 +740,7 @@ export async function syncPhotos(): Promise<void> {
     logger.error(MODULE, `Photo sync failed: ${err.message}`);
   } finally {
     productSyncRunning = false;
+    abortRequested = false;
     syncStatus.isRunning = stockSyncRunning;
     syncStatus.progress = null;
   }
