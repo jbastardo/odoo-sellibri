@@ -256,6 +256,32 @@ export async function fetchProductBySku(sku: string): Promise<OdooProduct | null
   return null;
 }
 
+/** Lightweight fetch: get all active (sellable, storable, with SKU) product SKUs from Odoo.
+ *  Used by cleanup logic to determine which products should exist in Sellibri. */
+export async function fetchAllActiveSKUs(): Promise<Set<string>> {
+  const skus = new Set<string>();
+  let offset = 0;
+  const batchSize = 2000;
+
+  while (true) {
+    const batch = await execute('product.product', 'search_read', [
+      [['sale_ok', '=', true], ['type', '=', 'product'], ['default_code', '!=', false], ['default_code', '!=', '']],
+    ], {
+      fields: ['default_code'],
+      offset,
+      limit: batchSize,
+    });
+    for (const p of batch as { default_code: string }[]) {
+      if (p.default_code) skus.add(p.default_code);
+    }
+    if (batch.length < batchSize) break;
+    offset += batchSize;
+  }
+
+  logger.info(MODULE, `Fetched ${skus.size} active SKUs from Odoo`);
+  return skus;
+}
+
 export async function createSaleOrder(partnerId: number, lines: { product_id: number; product_uom_qty: number; price_unit: number }[]): Promise<number> {
   const orderLines = lines.map(l => [0, 0, {
     product_id: l.product_id,

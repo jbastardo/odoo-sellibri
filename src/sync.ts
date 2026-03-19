@@ -556,6 +556,141 @@ export async function syncPhotos(): Promise<void> {
   logger.warn(MODULE, 'Photo sync is disabled — Sellibri API does not support image uploads. Use the admin panel instead.');
 }
 
+// ─── Cleanup: Delete from Sellibri products not in Odoo ────────
+
+let cleanupRunning = false;
+
+export interface CleanupResult {
+  totalSellibri: number;
+  totalOdoo: number;
+  deleted: number;
+  failed: number;
+  orphanSkus: string[];
+}
+
+/**
+ * Compare Sellibri catalog vs Odoo active SKUs.
+ * Delete from Sellibri any product whose SKU does not exist in Odoo
+ * (i.e., it was archived/removed in Odoo).
+ */
+export async function syncCleanup(): Promise<CleanupResult> {
+  if (cleanupRunning || productSyncRunning || stockSyncRunning) {
+    logger.warn(MODULE, 'Cleanup: another sync is running, skipping');
+    return { totalSellibri: 0, totalOdoo: 0, deleted: 0, failed: 0, orphanSkus: [] };
+  }
+  cleanupRunning = true;
+  syncStatus.isRunning = true;
+  syncStatus.lastError = null;
+
+  const result: CleanupResult = {
+    totalSellibri: 0,
+    totalOdoo: 0,
+    deleted: 0,
+    failed: 0,
+    orphanSkus: [],
+  };
+
+  try {
+    // Phase 1: Load all Sellibri products (SKU → product ID)
+    syncStatus.progress = {
+      current: 0, total: 0,
+      phase: 'Limpieza: cargando catálogo Sellibri...',
+      startedAt: new Date().toISOString(),
+      estimatedSecondsLeft: null,
+    };
+    logger.info(MODULE, 'Cleanup Phase 1: Loading Sellibri catalog...');
+    const sellibriCatalog = await sellibri.fetchAllProducts();
+    result.totalSellibri = sellibriCatalog.size;
+    logger.info(MODULE, `Sellibri catalog: ${sellibriCatalog.size} SKUs`);
+
+    // Phase 2: Load all active Odoo SKUs
+    syncStatus.progress.phase = 'Limpieza: cargando SKUs activos de Odoo...';
+    logger.info(MODULE, 'Cleanup Phase 2: Loading Odoo active SKUs...');
+    const odooSKUs = await odoo.fetchAllActiveSKUs();
+    result.totalOdoo = odooSKUs.size;
+    logger.info(MODULE, `Odoo active SKUs: ${odooSKUs.size}`);
+
+    // Phase 3: Find orphans (in Sellibri but not in Odoo)
+    const orphans: { sku: string; sellibriId: number }[] = [];
+    const seenIds = new Set<number>(); // Avoid deleting the same product twice (multiple SKUs per product)
+
+    for (const [sku, product] of sellibriCatalog) {
+      if (!odooSKUs.has(sku) && !seenIds.has(product.id)) {
+        orphans.push({ sku, sellibriId: product.id });
+        seenIds.add(product.id);
+        result.orphanSkus.push(sku);
+      }
+    }
+
+    logger.info(MODULE, `Found ${orphans.length} orphan products to delete from Sellibri`);
+
+    if (orphans.length === 0) {
+      logger.info(MODULE, 'Cleanup: no orphans found — catalogs are in sync');
+      return result;
+    }
+
+    // Phase 4: Delete orphans from Sellibri
+    const total = orphans.length;
+    const batchStartTime = Date.now();
+    syncStatus.progress = {
+      current: 0, total,
+      phase: `Limpieza: eliminando 0 / ${total} productos huérfanos...`,
+      startedAt: new Date().toISOString(),
+      estimatedSecondsLeft: null,
+    };
+
+    const state = loadState();
+
+    const tasks = orphans.map((orphan, idx) => async () => {
+      if (abortRequested) return;
+
+      try {
+        const deleted = await sellibri.deleteProduct(orphan.sellibriId);
+        if (deleted) {
+          result.deleted++;
+          // Remove from sync state
+          delete state.products[orphan.sku];
+        } else {
+          result.failed++;
+        }
+      } catch (err: any) {
+        result.failed++;
+        logger.error(MODULE, `Cleanup: failed to delete SKU=${orphan.sku} (id=${orphan.sellibriId}): ${err.message}`);
+      }
+
+      const done = result.deleted + result.failed;
+      const elapsed = (Date.now() - batchStartTime) / 1000;
+      const rate = done > 0 ? elapsed / done : 1;
+      syncStatus.progress = {
+        current: done,
+        total,
+        phase: `Limpieza: eliminando ${done} / ${total} productos huérfanos...`,
+        startedAt: syncStatus.progress?.startedAt || new Date().toISOString(),
+        estimatedSecondsLeft: Math.round((total - done) * rate),
+      };
+
+      if (done % 50 === 0) {
+        saveState(state);
+        logger.info(MODULE, `Cleanup progress: ${done}/${total} (deleted=${result.deleted}, failed=${result.failed})`);
+      }
+    });
+
+    await sellibri.batchExecute(tasks, 2); // Slightly lower concurrency for deletes
+    saveState(state);
+
+    logger.info(MODULE, `Cleanup complete: ${result.deleted} deleted, ${result.failed} failed out of ${orphans.length} orphans`);
+  } catch (err: any) {
+    syncStatus.lastError = err.message;
+    logger.error(MODULE, `Cleanup failed: ${err.message}`);
+  } finally {
+    cleanupRunning = false;
+    syncStatus.isRunning = productSyncRunning || stockSyncRunning;
+    syncStatus.progress = null;
+  }
+
+  return result;
+}
+
 // ─── Precio/Stock Sync (price_with_tax + qty_available) ────────
 
 export async function syncPriceStock(): Promise<void> {

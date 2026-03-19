@@ -3,7 +3,7 @@ import * as cron from 'node-cron';
 import * as path from 'path';
 import { config } from './config';
 import { logger } from './logger';
-import { syncProducts, syncPriceStock, syncSingleSku, syncPhotos, getSyncStatus, requestAbort, resetSyncState } from './sync';
+import { syncProducts, syncPriceStock, syncSingleSku, syncPhotos, syncCleanup, getSyncStatus, requestAbort, resetSyncState } from './sync';
 import { handleOrderWebhook, getRecentOrders } from './webhook';
 
 const app = express();
@@ -69,16 +69,18 @@ app.post('/api/sync/sku/:sku', async (req, res) => {
   res.json(result);
 });
 
-// Sync photos for products without images
-app.post('/api/sync/photos', async (_req, res) => {
+// Cleanup: delete from Sellibri products not in Odoo
+app.post('/api/sync/cleanup', async (_req, res) => {
   const status = getSyncStatus();
   if (status.isRunning) {
     res.json({ message: 'Sync already running' });
     return;
   }
-  res.json({ message: 'Photo sync started' });
-  syncPhotos().catch(err => {
-    logger.error('api', `Photo sync error: ${err.message}`);
+  res.json({ message: 'Cleanup started — comparing Odoo vs Sellibri...' });
+  syncCleanup().then(result => {
+    logger.info('api', `Cleanup finished: ${result.deleted} deleted, ${result.failed} failed, ${result.orphanSkus.length} orphans found`);
+  }).catch(err => {
+    logger.error('api', `Cleanup error: ${err.message}`);
   });
 });
 
@@ -111,26 +113,51 @@ app.get('/health', (_req, res) => {
 });
 
 // === Cron Jobs ===
-// DISABLED: auto-sync paused until catalog pre-load fix is verified.
-// Re-enable once confirmed working correctly.
 
-// Product sync every 30 minutes
-// cron.schedule('*/30 * * * *', () => {
-//   logger.info('cron', 'Triggering scheduled product sync');
-//   syncProducts().catch(err => {
-//     logger.error('cron', `Scheduled product sync error: ${err.message}`);
-//   });
-// });
+// Product sync every 30 minutes (smart sync: fills empty fields, always updates price/qty)
+cron.schedule('*/30 * * * *', () => {
+  const status = getSyncStatus();
+  if (status.isRunning) {
+    logger.warn('cron', 'Skipping scheduled product sync — another sync is running');
+    return;
+  }
+  logger.info('cron', 'Triggering scheduled product sync');
+  syncProducts().catch(err => {
+    logger.error('cron', `Scheduled product sync error: ${err.message}`);
+  });
+});
 
 // Price/Stock sync every 15 minutes
-// cron.schedule('*/15 * * * *', () => {
-//   logger.info('cron', 'Triggering scheduled price/stock sync');
-//   syncPriceStock().catch(err => {
-//     logger.error('cron', `Scheduled price/stock sync error: ${err.message}`);
-//   });
-// });
+cron.schedule('*/15 * * * *', () => {
+  const status = getSyncStatus();
+  if (status.isRunning) {
+    logger.warn('cron', 'Skipping scheduled price/stock sync — another sync is running');
+    return;
+  }
+  logger.info('cron', 'Triggering scheduled price/stock sync');
+  syncPriceStock().catch(err => {
+    logger.error('cron', `Scheduled price/stock sync error: ${err.message}`);
+  });
+});
 
-logger.warn('server', 'Cron auto-sync is DISABLED. Use manual buttons on the dashboard.');
+// Cleanup: delete orphans from Sellibri every 6 hours
+cron.schedule('0 */6 * * *', () => {
+  const status = getSyncStatus();
+  if (status.isRunning) {
+    logger.warn('cron', 'Skipping scheduled cleanup — another sync is running');
+    return;
+  }
+  logger.info('cron', 'Triggering scheduled cleanup (delete Sellibri orphans)');
+  syncCleanup().then(result => {
+    if (result.deleted > 0) {
+      logger.info('cron', `Cleanup: deleted ${result.deleted} orphan products from Sellibri`);
+    }
+  }).catch(err => {
+    logger.error('cron', `Scheduled cleanup error: ${err.message}`);
+  });
+});
+
+logger.info('server', 'Cron auto-sync ENABLED: products/30min, price-stock/15min, cleanup/6h');
 
 // === Start Server ===
 

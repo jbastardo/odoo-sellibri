@@ -227,6 +227,45 @@ export async function updateProduct(id: number, payload: SellibriProductPayload)
   return data.product || data;
 }
 
+async function apiDelete<T = any>(path: string): Promise<T> {
+  return withRetry(async () => {
+    await rateLimiter.waitForSlot();
+    const resp = await client.delete(path);
+    return resp.data;
+  });
+}
+
+/** Delete a product from Sellibri by its ID */
+export async function deleteProduct(id: number): Promise<boolean> {
+  try {
+    await apiDelete(`/products/${id}`);
+    logger.info(MODULE, `Deleted product id=${id} from Sellibri`);
+    return true;
+  } catch (err: any) {
+    const status = (err as AxiosError)?.response?.status;
+    if (status === 404) {
+      logger.warn(MODULE, `Product id=${id} already deleted (404)`);
+      return true; // Already gone
+    }
+    logger.error(MODULE, `Failed to delete product id=${id}: ${err.message}`);
+    return false;
+  }
+}
+
+/** Deactivate a product in Sellibri (set status='draft') */
+export async function deactivateProduct(id: number): Promise<boolean> {
+  try {
+    await apiPatch(`/products/${id}`, {
+      product: { title: '', status: 'draft' },
+    });
+    logger.info(MODULE, `Deactivated product id=${id} (status=draft)`);
+    return true;
+  } catch (err: any) {
+    logger.error(MODULE, `Failed to deactivate product id=${id}: ${err.message}`);
+    return false;
+  }
+}
+
 export async function updateVariantStock(
   variantId: number,
   stockLocationId: number,
