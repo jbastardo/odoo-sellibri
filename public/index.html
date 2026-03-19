@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Odoo ↔ Sellibri Integration</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    .log-info { color: #3b82f6; }
+    .log-warn { color: #f59e0b; }
+    .log-error { color: #ef4444; }
+  </style>
+</head>
+<body class="bg-gray-900 text-gray-100 min-h-screen">
+  <div class="max-w-6xl mx-auto p-6">
+    <header class="mb-8">
+      <h1 class="text-3xl font-bold">Odoo ↔ Sellibri</h1>
+      <p class="text-gray-400 mt-1">ONPROTEC Integration Dashboard</p>
+    </header>
+
+    <!-- Status Cards -->
+    <div class="grid grid-cols-1 md:grid-cols-4 gap-4 mb-8">
+      <div class="bg-gray-800 rounded-lg p-4">
+        <div class="text-sm text-gray-400">Products Synced</div>
+        <div id="products-synced" class="text-2xl font-bold mt-1">—</div>
+      </div>
+      <div class="bg-gray-800 rounded-lg p-4">
+        <div class="text-sm text-gray-400">Last Product Sync</div>
+        <div id="last-product-sync" class="text-sm font-mono mt-1">—</div>
+      </div>
+      <div class="bg-gray-800 rounded-lg p-4">
+        <div class="text-sm text-gray-400">Last Stock Sync</div>
+        <div id="last-stock-sync" class="text-sm font-mono mt-1">—</div>
+      </div>
+      <div class="bg-gray-800 rounded-lg p-4">
+        <div class="text-sm text-gray-400">Status</div>
+        <div id="sync-status" class="text-lg font-bold mt-1">—</div>
+      </div>
+    </div>
+
+    <!-- Action Buttons -->
+    <div class="flex gap-3 mb-8">
+      <button onclick="triggerSync('products')" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg font-medium transition">
+        Sync Products
+      </button>
+      <button onclick="triggerSync('stock')" class="bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded-lg font-medium transition">
+        Sync Stock
+      </button>
+      <button onclick="fetchStatus()" class="bg-gray-700 hover:bg-gray-600 text-white px-4 py-2 rounded-lg font-medium transition">
+        Refresh
+      </button>
+    </div>
+
+    <!-- Error Display -->
+    <div id="error-banner" class="hidden bg-red-900/50 border border-red-700 rounded-lg p-4 mb-8">
+      <div class="font-medium text-red-300">Last Error</div>
+      <div id="error-text" class="text-sm text-red-200 mt-1 font-mono"></div>
+    </div>
+
+    <!-- Recent Orders -->
+    <div class="mb-8">
+      <h2 class="text-xl font-semibold mb-3">Recent Orders</h2>
+      <div class="bg-gray-800 rounded-lg overflow-hidden">
+        <table class="w-full text-sm">
+          <thead class="bg-gray-700">
+            <tr>
+              <th class="text-left p-3">Time</th>
+              <th class="text-left p-3">Order</th>
+              <th class="text-left p-3">Status</th>
+              <th class="text-left p-3">Error</th>
+            </tr>
+          </thead>
+          <tbody id="orders-table">
+            <tr><td colspan="4" class="p-3 text-gray-500">No orders yet</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Logs -->
+    <div>
+      <h2 class="text-xl font-semibold mb-3">Sync Logs</h2>
+      <div class="bg-gray-800 rounded-lg p-4 max-h-96 overflow-y-auto font-mono text-xs" id="logs-container">
+        <div class="text-gray-500">Loading...</div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    function formatDate(iso) {
+      if (!iso) return '—';
+      const d = new Date(iso);
+      return d.toLocaleString();
+    }
+
+    async function fetchStatus() {
+      try {
+        const resp = await fetch('/api/status');
+        const data = await resp.json();
+
+        // Sync status
+        document.getElementById('products-synced').textContent = data.sync.productsSynced || 0;
+        document.getElementById('last-product-sync').textContent = formatDate(data.sync.lastProductSync);
+        document.getElementById('last-stock-sync').textContent = formatDate(data.sync.lastStockSync);
+
+        const statusEl = document.getElementById('sync-status');
+        if (data.sync.isRunning) {
+          statusEl.textContent = 'Running';
+          statusEl.className = 'text-lg font-bold mt-1 text-yellow-400';
+        } else {
+          statusEl.textContent = 'Idle';
+          statusEl.className = 'text-lg font-bold mt-1 text-green-400';
+        }
+
+        // Error
+        const errorBanner = document.getElementById('error-banner');
+        if (data.sync.lastError) {
+          errorBanner.classList.remove('hidden');
+          document.getElementById('error-text').textContent = data.sync.lastError;
+        } else {
+          errorBanner.classList.add('hidden');
+        }
+
+        // Orders
+        const ordersTable = document.getElementById('orders-table');
+        if (data.recentOrders && data.recentOrders.length > 0) {
+          ordersTable.innerHTML = data.recentOrders.reverse().map(o => `
+            <tr class="border-t border-gray-700">
+              <td class="p-3">${formatDate(o.timestamp)}</td>
+              <td class="p-3 font-mono">${o.orderNumber}</td>
+              <td class="p-3">
+                <span class="px-2 py-1 rounded text-xs ${
+                  o.status === 'created' ? 'bg-green-900 text-green-300' :
+                  o.status === 'error' ? 'bg-red-900 text-red-300' :
+                  'bg-yellow-900 text-yellow-300'
+                }">${o.status}</span>
+              </td>
+              <td class="p-3 text-xs text-gray-400">${o.error || ''}</td>
+            </tr>
+          `).join('');
+        } else {
+          ordersTable.innerHTML = '<tr><td colspan="4" class="p-3 text-gray-500">No orders yet</td></tr>';
+        }
+
+        // Logs
+        const logsContainer = document.getElementById('logs-container');
+        if (data.logs && data.logs.length > 0) {
+          logsContainer.innerHTML = data.logs.reverse().map(l =>
+            `<div class="log-${l.level}"><span class="text-gray-500">${l.timestamp}</span> [${l.module}] ${l.message}</div>`
+          ).join('');
+        } else {
+          logsContainer.innerHTML = '<div class="text-gray-500">No logs yet</div>';
+        }
+      } catch (err) {
+        console.error('Failed to fetch status:', err);
+      }
+    }
+
+    async function triggerSync(type) {
+      try {
+        const resp = await fetch(`/api/sync/${type}`, { method: 'POST' });
+        const data = await resp.json();
+        alert(data.message);
+        setTimeout(fetchStatus, 2000);
+      } catch (err) {
+        alert('Failed to trigger sync: ' + err.message);
+      }
+    }
+
+    // Initial load and auto-refresh
+    fetchStatus();
+    setInterval(fetchStatus, 15000);
+  </script>
+</body>
+</html>

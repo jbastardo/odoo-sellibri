@@ -1,0 +1,153 @@
+import axios, { AxiosInstance, AxiosError } from 'axios';
+import { config } from './config';
+import { logger } from './logger';
+
+const MODULE = 'sellibri';
+
+// Rate limiter: 4 req/sec, 240/min
+class RateLimiter {
+  private timestamps: number[] = [];
+  private readonly maxPerSecond = 4;
+  private readonly maxPerMinute = 240;
+
+  async waitForSlot(): Promise<void> {
+    const now = Date.now();
+
+    // Clean old timestamps
+    this.timestamps = this.timestamps.filter(t => now - t < 60_000);
+
+    // Check per-minute limit
+    if (this.timestamps.length >= this.maxPerMinute) {
+      const oldest = this.timestamps[0];
+      const waitMs = 60_000 - (now - oldest) + 50;
+      logger.warn(MODULE, `Rate limit (per-min): waiting ${waitMs}ms`);
+      await this.delay(waitMs);
+      return this.waitForSlot();
+    }
+
+    // Check per-second limit
+    const recentSecond = this.timestamps.filter(t => now - t < 1000);
+    if (recentSecond.length >= this.maxPerSecond) {
+      const oldest = recentSecond[0];
+      const waitMs = 1000 - (now - oldest) + 50;
+      await this.delay(waitMs);
+      return this.waitForSlot();
+    }
+
+    this.timestamps.push(Date.now());
+  }
+
+  private delay(ms: number): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+}
+
+const rateLimiter = new RateLimiter();
+
+const client: AxiosInstance = axios.create({
+  baseURL: config.sellibri.baseUrl,
+  headers: {
+    'X-Api-Key': config.sellibri.apiKey,
+    'Content-Type': 'application/json',
+  },
+  timeout: 30_000,
+});
+
+async function apiGet<T = any>(path: string, params?: Record<string, any>): Promise<T> {
+  await rateLimiter.waitForSlot();
+  const resp = await client.get(path, { params });
+  return resp.data;
+}
+
+async function apiPost<T = any>(path: string, data: any): Promise<T> {
+  await rateLimiter.waitForSlot();
+  const resp = await client.post(path, data);
+  return resp.data;
+}
+
+async function apiPatch<T = any>(path: string, data: any): Promise<T> {
+  await rateLimiter.waitForSlot();
+  const resp = await client.patch(path, data);
+  return resp.data;
+}
+
+export interface SellibriVariant {
+  id?: number;
+  price: string;
+  sku: string;
+  barcode?: string;
+  weight?: number;
+  width?: number | null;
+  height?: number | null;
+  length?: number | null;
+  track_inventory: boolean;
+  tax_rate_id: number;
+  images?: { image: string }[];
+  stock_items?: { stock_location_id: number; available: number }[];
+}
+
+export interface SellibriProductPayload {
+  product: {
+    title: string;
+    status?: string;
+    description?: string;
+    all_variants: SellibriVariant[];
+    taxon_ids: number[];
+  };
+}
+
+export interface SellibriProduct {
+  id: number;
+  title: string;
+  all_variants: {
+    id: number;
+    sku: string;
+    price: string;
+    stock_items: { id: number; stock_location_id: number; available: number }[];
+  }[];
+}
+
+export async function findProductBySku(sku: string): Promise<SellibriProduct | null> {
+  try {
+    const data = await apiGet('/products', { 'q[sku_eq]': sku });
+    const products = data.products || data;
+    if (Array.isArray(products) && products.length > 0) {
+      return products[0];
+    }
+    return null;
+  } catch (err: any) {
+    if ((err as AxiosError)?.response?.status === 404) return null;
+    throw err;
+  }
+}
+
+export async function createProduct(payload: SellibriProductPayload): Promise<SellibriProduct> {
+  const data = await apiPost('/products', payload);
+  return data.product || data;
+}
+
+export async function updateProduct(id: number, payload: SellibriProductPayload): Promise<SellibriProduct> {
+  const data = await apiPatch(`/products/${id}`, payload);
+  return data.product || data;
+}
+
+export async function updateStockItem(
+  productId: number,
+  variantId: number,
+  stockLocationId: number,
+  available: number,
+): Promise<void> {
+  // Try to update stock via the product variant's stock items
+  const payload = {
+    product: {
+      all_variants: [{
+        id: variantId,
+        stock_items: [{
+          stock_location_id: stockLocationId,
+          available: Math.max(0, Math.floor(available)),
+        }],
+      }],
+    },
+  };
+  await apiPatch(`/products/${productId}`, payload);
+}
