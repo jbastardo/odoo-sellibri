@@ -62,10 +62,7 @@
         class="bg-green-600 hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed text-white px-4 py-2 rounded-lg font-medium transition">
         Precio/Stock
       </button>
-      <button onclick="triggerPhotoSync()" id="btn-photos"
-        class="bg-purple-600 hover:bg-purple-700 disabled:opacity-50 disabled:cursor-not-allowed text-white px-4 py-2 rounded-lg font-medium transition">
-        🖼️ Sync Fotos
-      </button>
+
       <button onclick="abortSync()" id="btn-abort"
         class="hidden bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-lg font-medium transition">
         ⛔ Detener
@@ -154,7 +151,7 @@
         const statusEl = document.getElementById('sync-status');
         const btnProducts = document.getElementById('btn-products');
         const btnStock = document.getElementById('btn-stock');
-        const btnPhotos = document.getElementById('btn-photos');
+
         const btnAbort = document.getElementById('btn-abort');
 
         if (sync.isRunning) {
@@ -162,14 +159,14 @@
           statusEl.className = 'text-lg font-bold mt-1 text-yellow-400';
           btnProducts.disabled = true;
           btnStock.disabled = true;
-          btnPhotos.disabled = true;
+
           btnAbort.classList.remove('hidden');
         } else {
           statusEl.textContent = 'Inactivo';
           statusEl.className = 'text-lg font-bold mt-1 text-green-400';
           btnProducts.disabled = false;
           btnStock.disabled = false;
-          btnPhotos.disabled = false;
+
           btnAbort.classList.add('hidden');
         }
 
@@ -245,17 +242,7 @@
       }
     }
 
-    async function triggerPhotoSync() {
-      try {
-        document.getElementById('btn-products').disabled = true;
-        document.getElementById('btn-stock').disabled = true;
-        document.getElementById('btn-photos').disabled = true;
-        await fetch('/api/sync/photos', { method: 'POST' });
-        setTimeout(fetchStatus, 1000);
-      } catch (err) {
-        alert('Error: ' + err.message);
-      }
-    }
+
 
     async function forceSyncSku() {
       const input = document.getElementById('sku-input');
