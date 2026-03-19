@@ -107,6 +107,21 @@ export function requestAbort(): boolean {
   return true;
 }
 
+/** Clear all sync state — forces full re-sync from scratch */
+export function resetSyncState(): void {
+  try {
+    if (fs.existsSync(STATE_FILE)) {
+      fs.unlinkSync(STATE_FILE);
+    }
+    syncStatus.productsSynced = 0;
+    syncStatus.lastProductSync = null;
+    syncStatus.lastStockSync = null;
+    logger.warn(MODULE, 'Sync state cleared — next sync will start from scratch');
+  } catch (err: any) {
+    logger.error(MODULE, `Could not clear sync state: ${err.message}`);
+  }
+}
+
 // ─── Helpers ───────────────────────────────────────────────────
 
 function isEmpty(val: any): boolean {

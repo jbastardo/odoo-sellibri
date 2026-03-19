@@ -3,7 +3,7 @@ import * as cron from 'node-cron';
 import * as path from 'path';
 import { config } from './config';
 import { logger } from './logger';
-import { syncProducts, syncPriceStock, syncSingleSku, syncPhotos, getSyncStatus, requestAbort } from './sync';
+import { syncProducts, syncPriceStock, syncSingleSku, syncPhotos, getSyncStatus, requestAbort, resetSyncState } from './sync';
 import { handleOrderWebhook, getRecentOrders } from './webhook';
 
 const app = express();
@@ -91,6 +91,17 @@ app.post('/api/sync/abort', (_req, res) => {
   });
 });
 
+// Reset sync state (clear all mappings, force full re-sync)
+app.post('/api/sync/reset', (_req, res) => {
+  const status = getSyncStatus();
+  if (status.isRunning) {
+    res.json({ success: false, message: 'No se puede resetear mientras hay una sincronización en curso' });
+    return;
+  }
+  resetSyncState();
+  res.json({ success: true, message: 'Estado de sincronización eliminado. La próxima sync empezará desde cero.' });
+});
+
 // Webhook endpoint
 app.post('/webhook/orders', handleOrderWebhook);
 
@@ -100,22 +111,26 @@ app.get('/health', (_req, res) => {
 });
 
 // === Cron Jobs ===
+// DISABLED: auto-sync paused until catalog pre-load fix is verified.
+// Re-enable once confirmed working correctly.
 
 // Product sync every 30 minutes
-cron.schedule('*/30 * * * *', () => {
-  logger.info('cron', 'Triggering scheduled product sync');
-  syncProducts().catch(err => {
-    logger.error('cron', `Scheduled product sync error: ${err.message}`);
-  });
-});
+// cron.schedule('*/30 * * * *', () => {
+//   logger.info('cron', 'Triggering scheduled product sync');
+//   syncProducts().catch(err => {
+//     logger.error('cron', `Scheduled product sync error: ${err.message}`);
+//   });
+// });
 
 // Price/Stock sync every 15 minutes
-cron.schedule('*/15 * * * *', () => {
-  logger.info('cron', 'Triggering scheduled price/stock sync');
-  syncPriceStock().catch(err => {
-    logger.error('cron', `Scheduled price/stock sync error: ${err.message}`);
-  });
-});
+// cron.schedule('*/15 * * * *', () => {
+//   logger.info('cron', 'Triggering scheduled price/stock sync');
+//   syncPriceStock().catch(err => {
+//     logger.error('cron', `Scheduled price/stock sync error: ${err.message}`);
+//   });
+// });
+
+logger.warn('server', 'Cron auto-sync is DISABLED. Use manual buttons on the dashboard.');
 
 // === Start Server ===
 

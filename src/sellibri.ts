@@ -122,11 +122,12 @@ export interface SellibriProduct {
   taxon_ids?: number[];
 }
 
-/** Fetch ALL products from Sellibri with pagination. Builds SKU→product map. */
+/** Fetch ALL products from Sellibri with pagination. Builds SKU→product map.
+ *  Note: Sellibri API caps per_page at 50 regardless of what you request. */
 export async function fetchAllProducts(): Promise<Map<string, SellibriProduct>> {
   const map = new Map<string, SellibriProduct>();
   let page = 1;
-  const perPage = 250;
+  const perPage = 50; // API maximum is 50
 
   while (true) {
     const data = await apiGet('/products', { per_page: perPage, page });
@@ -141,20 +142,38 @@ export async function fetchAllProducts(): Promise<Map<string, SellibriProduct>> 
       }
     }
 
-    logger.info(MODULE, `Loaded Sellibri catalog page ${page} (${products.length} products, ${map.size} SKUs total)`);
+    if (page % 20 === 0 || products.length < perPage) {
+      logger.info(MODULE, `Loaded Sellibri catalog page ${page} (${map.size} SKUs total)`);
+    }
     if (products.length < perPage) break;
     page++;
   }
 
+  logger.info(MODULE, `Sellibri catalog fully loaded: ${page} pages, ${map.size} SKUs`);
   return map;
 }
 
+/** Search for a product by SKU by scanning ALL pages.
+ *  Sellibri API ignores query/filter parameters, so we must paginate
+ *  through the entire catalog and match variant SKU locally. */
 export async function findProductBySku(sku: string): Promise<SellibriProduct | null> {
   try {
-    const data = await apiGet('/products', { 'q[sku_eq]': sku });
-    const products = data.products || data;
-    if (Array.isArray(products) && products.length > 0) {
-      return products[0];
+    let page = 1;
+    while (true) {
+      const data = await apiGet('/products', { per_page: 50, page });
+      const products: SellibriProduct[] = data.products || [];
+      if (products.length === 0) break;
+
+      for (const p of products) {
+        for (const v of p.all_variants || []) {
+          if (v.sku === sku) {
+            return p;
+          }
+        }
+      }
+
+      if (products.length < 50) break;
+      page++;
     }
     return null;
   } catch (err: any) {

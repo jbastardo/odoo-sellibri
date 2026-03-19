@@ -73,6 +73,10 @@
       <button onclick="fetchStatus()" class="bg-gray-700 hover:bg-gray-600 text-white px-4 py-2 rounded-lg font-medium transition">
         Refrescar
       </button>
+      <button onclick="resetState()" id="btn-reset"
+        class="bg-yellow-600 hover:bg-yellow-700 text-white px-4 py-2 rounded-lg font-medium transition text-sm">
+        ⚠️ Resetear Estado
+      </button>
     </div>
 
     <!-- SKU Force Sync -->
@@ -286,6 +290,18 @@
       } finally {
         btn.disabled = false;
         setTimeout(fetchStatus, 1000);
+      }
+    }
+
+    async function resetState() {
+      if (!confirm('¿Seguro? Esto borra todo el estado de sincronización.\nLa próxima sync empezará desde cero.')) return;
+      try {
+        const resp = await fetch('/api/sync/reset', { method: 'POST' });
+        const data = await resp.json();
+        alert(data.message);
+        fetchStatus();
+      } catch (err) {
+        alert('Error: ' + err.message);
       }
     }
 
