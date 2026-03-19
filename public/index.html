@@ -84,6 +84,10 @@
         class="bg-yellow-600 hover:bg-yellow-700 text-white px-4 py-2 rounded-lg font-medium transition text-sm">
         ⚠️ Resetear Estado
       </button>
+      <button onclick="runDiagnostic()" id="btn-diagnostic"
+        class="bg-cyan-600 hover:bg-cyan-700 text-white px-4 py-2 rounded-lg font-medium transition text-sm">
+        🔍 Diagnóstico
+      </button>
     </div>
 
     <!-- SKU Force Sync -->
@@ -96,6 +100,19 @@
         🔄 Actualizar SKU
       </button>
       <span id="sku-result" class="text-sm ml-2"></span>
+    </div>
+
+    <!-- Diagnostic Modal -->
+    <div id="diagnostic-modal" class="hidden fixed inset-0 bg-black/70 z-50 flex items-center justify-center p-4">
+      <div class="bg-gray-800 rounded-xl max-w-4xl w-full max-h-[85vh] flex flex-col">
+        <div class="flex items-center justify-between p-4 border-b border-gray-700">
+          <h3 class="text-lg font-bold">🔍 Diagnóstico de productos</h3>
+          <button onclick="closeDiagnostic()" class="text-gray-400 hover:text-white text-2xl leading-none">&times;</button>
+        </div>
+        <div id="diagnostic-content" class="p-4 overflow-y-auto flex-1">
+          <div class="text-gray-400">Cargando...</div>
+        </div>
+      </div>
     </div>
 
     <!-- Error Display -->
@@ -348,6 +365,84 @@
       } catch (err) {
         alert('Error: ' + err.message);
       }
+    }
+
+    async function runDiagnostic() {
+      const modal = document.getElementById('diagnostic-modal');
+      const content = document.getElementById('diagnostic-content');
+      modal.classList.remove('hidden');
+      content.innerHTML = '<div class="text-gray-400 text-center py-8">Analizando productos de Odoo... Esto puede tardar unos segundos.</div>';
+
+      try {
+        const resp = await fetch('/api/diagnostic/excluded');
+        const data = await resp.json();
+
+        if (!data.success) {
+          content.innerHTML = `<div class="text-red-400">Error: ${data.message}</div>`;
+          return;
+        }
+
+        let html = `
+          <div class="grid grid-cols-3 gap-4 mb-6">
+            <div class="bg-gray-700 rounded-lg p-3 text-center">
+              <div class="text-2xl font-bold">${data.total_odoo}</div>
+              <div class="text-xs text-gray-400">Total en Odoo</div>
+            </div>
+            <div class="bg-green-900/40 rounded-lg p-3 text-center">
+              <div class="text-2xl font-bold text-green-400">${data.syncable}</div>
+              <div class="text-xs text-gray-400">Sincronizables</div>
+            </div>
+            <div class="bg-red-900/40 rounded-lg p-3 text-center">
+              <div class="text-2xl font-bold text-red-400">${data.excluded_count}</div>
+              <div class="text-xs text-gray-400">Excluidos</div>
+            </div>
+          </div>
+        `;
+
+        if (data.excluded.length > 0) {
+          html += `
+            <h4 class="font-semibold mb-2">Productos excluidos de la sincronización:</h4>
+            <div class="overflow-x-auto">
+              <table class="w-full text-xs">
+                <thead class="bg-gray-700">
+                  <tr>
+                    <th class="text-left p-2">ID</th>
+                    <th class="text-left p-2">SKU</th>
+                    <th class="text-left p-2">Nombre</th>
+                    <th class="text-left p-2">Tipo</th>
+                    <th class="text-left p-2">Vendible</th>
+                    <th class="text-left p-2">Precio</th>
+                    <th class="text-left p-2">Razón</th>
+                  </tr>
+                </thead>
+                <tbody>
+          `;
+          for (const p of data.excluded) {
+            html += `
+              <tr class="border-t border-gray-700">
+                <td class="p-2 font-mono">${p.id}</td>
+                <td class="p-2 font-mono">${p.default_code || '—'}</td>
+                <td class="p-2">${p.name}</td>
+                <td class="p-2">${p.type}</td>
+                <td class="p-2">${p.sale_ok ? '✓' : '✗'}</td>
+                <td class="p-2">${p.price_with_tax || p.list_price || 0}</td>
+                <td class="p-2 text-yellow-400">${p.reason}</td>
+              </tr>
+            `;
+          }
+          html += '</tbody></table></div>';
+        } else {
+          html += '<div class="text-green-400 text-center py-4">Todos los productos son sincronizables ✓</div>';
+        }
+
+        content.innerHTML = html;
+      } catch (err) {
+        content.innerHTML = `<div class="text-red-400">Error: ${err.message}</div>`;
+      }
+    }
+
+    function closeDiagnostic() {
+      document.getElementById('diagnostic-modal').classList.add('hidden');
     }
 
     fetchStatus();

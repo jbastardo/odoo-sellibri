@@ -87,7 +87,7 @@ export async function fetchProducts(
 ): Promise<OdooProduct[]> {
   const domain: any[] = [
     ['sale_ok', '=', true],
-    ['type', '=', 'product'],
+    ['type', 'in', ['product', 'consu']],
     ['default_code', '!=', false],
     ['default_code', '!=', ''],
   ];
@@ -144,7 +144,7 @@ export async function fetchStockAndPrices(): Promise<StockPriceProduct[]> {
 
   while (true) {
     const batch = await execute('product.product', 'search_read', [
-      [['sale_ok', '=', true], ['type', '=', 'product'], ['default_code', '!=', false], ['default_code', '!=', '']],
+      [['sale_ok', '=', true], ['type', 'in', ['product', 'consu']], ['default_code', '!=', false], ['default_code', '!=', '']],
     ], {
       fields: ['default_code', 'qty_available', 'price_with_tax'],
       offset,
@@ -242,7 +242,7 @@ export async function findProductBySku(sku: string): Promise<number | null> {
 /** Fetch a single product by SKU with all sync-relevant fields */
 export async function fetchProductBySku(sku: string): Promise<OdooProduct | null> {
   const products = await execute('product.product', 'search_read', [
-    [['default_code', '=', sku], ['sale_ok', '=', true], ['type', '=', 'product']],
+    [['default_code', '=', sku], ['sale_ok', '=', true], ['type', 'in', ['product', 'consu']]],
   ], {
     fields: [
       'name', 'default_code', 'list_price', 'price_with_tax', 'qty_available', 'weight',
@@ -265,7 +265,7 @@ export async function fetchAllActiveSKUs(): Promise<Set<string>> {
 
   while (true) {
     const batch = await execute('product.product', 'search_read', [
-      [['sale_ok', '=', true], ['type', '=', 'product'], ['default_code', '!=', false], ['default_code', '!=', '']],
+      [['sale_ok', '=', true], ['type', 'in', ['product', 'consu']], ['default_code', '!=', false], ['default_code', '!=', '']],
     ], {
       fields: ['default_code'],
       offset,
@@ -280,6 +280,71 @@ export async function fetchAllActiveSKUs(): Promise<Set<string>> {
 
   logger.info(MODULE, `Fetched ${skus.size} active SKUs from Odoo`);
   return skus;
+}
+
+/** Diagnostic: fetch ALL products (no type filter) and classify why some are excluded from sync */
+export interface ExcludedProduct {
+  id: number;
+  name: string;
+  default_code: string | false;
+  type: string;
+  sale_ok: boolean;
+  list_price: number;
+  price_with_tax: number;
+  reason: string;
+}
+
+export async function fetchExcludedProducts(): Promise<{ total: number; syncable: number; excluded: ExcludedProduct[] }> {
+  const all: any[] = [];
+  let offset = 0;
+  const batchSize = 500;
+
+  // Fetch ALL products without type/sale_ok filters — only basic existence filters
+  while (true) {
+    const batch = await execute('product.product', 'search_read', [
+      [['active', '=', true]],
+    ], {
+      fields: ['name', 'default_code', 'type', 'sale_ok', 'list_price', 'price_with_tax'],
+      offset,
+      limit: batchSize,
+    });
+    all.push(...batch);
+    if (batch.length < batchSize) break;
+    offset += batchSize;
+  }
+
+  const excluded: ExcludedProduct[] = [];
+  let syncable = 0;
+
+  for (const p of all) {
+    const reasons: string[] = [];
+
+    if (!p.sale_ok) reasons.push('sale_ok=false');
+    if (p.type !== 'product' && p.type !== 'consu') reasons.push(`type=${p.type} (no es product ni consu)`);
+    if (!p.default_code || (typeof p.default_code === 'string' && p.default_code.trim() === '')) reasons.push('sin SKU');
+
+    // Validate price
+    const price = p.price_with_tax > 0 ? p.price_with_tax : p.list_price * (1 + 0.16);
+    if (!price || price <= 0) reasons.push('precio=0');
+    if (!p.name || p.name.trim() === '') reasons.push('sin nombre');
+
+    if (reasons.length > 0) {
+      excluded.push({
+        id: p.id,
+        name: p.name || '(sin nombre)',
+        default_code: p.default_code || false,
+        type: p.type,
+        sale_ok: p.sale_ok,
+        list_price: p.list_price,
+        price_with_tax: p.price_with_tax,
+        reason: reasons.join(', '),
+      });
+    } else {
+      syncable++;
+    }
+  }
+
+  return { total: all.length, syncable, excluded };
 }
 
 export async function createSaleOrder(partnerId: number, lines: { product_id: number; product_uom_qty: number; price_unit: number }[]): Promise<number> {

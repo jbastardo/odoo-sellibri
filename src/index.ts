@@ -4,6 +4,7 @@ import * as path from 'path';
 import { config } from './config';
 import { logger } from './logger';
 import { syncProducts, syncPriceStock, syncSingleSku, syncPhotos, syncCleanup, syncFixTitlesSku, getSyncStatus, requestAbort, resetSyncState } from './sync';
+import { fetchExcludedProducts } from './odoo';
 import { handleOrderWebhook, getRecentOrders } from './webhook';
 
 const app = express();
@@ -143,6 +144,22 @@ app.post('/api/sync/reset', (_req, res) => {
   }
   resetSyncState();
   res.json({ success: true, message: 'Estado de sincronización eliminado. La próxima sync empezará desde cero.' });
+});
+
+// Diagnostic: products excluded from sync
+app.get('/api/diagnostic/excluded', async (_req, res) => {
+  try {
+    const result = await fetchExcludedProducts();
+    res.json({
+      success: true,
+      total_odoo: result.total,
+      syncable: result.syncable,
+      excluded_count: result.excluded.length,
+      excluded: result.excluded,
+    });
+  } catch (err: any) {
+    res.status(500).json({ success: false, message: err.message });
+  }
 });
 
 // Webhook endpoint
