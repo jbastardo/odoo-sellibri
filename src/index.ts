@@ -8,6 +8,27 @@ import { handleOrderWebhook, getRecentOrders } from './webhook';
 
 const app = express();
 
+// ─── Manual action lock ────────────────────────────────────────
+// When a manual action is running, cron jobs must NOT execute.
+// Cleared automatically when the manual action finishes.
+
+let manualActionRunning = false;
+
+function startManualAction(name: string): boolean {
+  const status = getSyncStatus();
+  if (status.isRunning || manualActionRunning) {
+    return false;
+  }
+  manualActionRunning = true;
+  logger.info('api', `Manual action started: ${name} — cron blocked until finished`);
+  return true;
+}
+
+function endManualAction(name: string): void {
+  manualActionRunning = false;
+  logger.info('api', `Manual action finished: ${name} — cron unblocked`);
+}
+
 // Raw body capture for HMAC verification on webhook route
 app.use('/webhook', express.json({
   verify: (req: any, _res, buf) => {
@@ -32,71 +53,79 @@ app.get('/api/status', (_req, res) => {
   });
 });
 
-// Manual sync triggers
+// Manual sync triggers — all set manualActionRunning to block cron
+
 app.post('/api/sync/products', async (_req, res) => {
-  const status = getSyncStatus();
-  if (status.isRunning) {
-    res.json({ message: 'Sync already running' });
+  if (!startManualAction('Sincronizar Productos')) {
+    res.json({ message: 'Ya hay una sincronización en curso' });
     return;
   }
-  res.json({ message: 'Product sync started' });
-  syncProducts().catch(err => {
-    logger.error('api', `Manual product sync error: ${err.message}`);
-  });
+  res.json({ message: 'Sincronización de productos iniciada' });
+  syncProducts()
+    .catch(err => logger.error('api', `Manual product sync error: ${err.message}`))
+    .finally(() => endManualAction('Sincronizar Productos'));
 });
 
 app.post('/api/sync/stock', async (_req, res) => {
-  const status = getSyncStatus();
-  if (status.isRunning) {
-    res.json({ message: 'Sync already running' });
+  if (!startManualAction('Precio/Stock')) {
+    res.json({ message: 'Ya hay una sincronización en curso' });
     return;
   }
-  res.json({ message: 'Price/Stock sync started' });
-  syncPriceStock().catch(err => {
-    logger.error('api', `Manual price/stock sync error: ${err.message}`);
-  });
+  res.json({ message: 'Sincronización precio/stock iniciada' });
+  syncPriceStock()
+    .catch(err => logger.error('api', `Manual price/stock sync error: ${err.message}`))
+    .finally(() => endManualAction('Precio/Stock'));
 });
 
-// Force sync a single SKU (all fields + images)
 app.post('/api/sync/sku/:sku', async (req, res) => {
   const { sku } = req.params;
   if (!sku || sku.trim() === '') {
     res.status(400).json({ success: false, message: 'SKU requerido' });
     return;
   }
-  logger.info('api', `Manual force sync for SKU=${sku}`);
-  const result = await syncSingleSku(sku.trim());
-  res.json(result);
-});
-
-// Cleanup: delete from Sellibri products not in Odoo
-app.post('/api/sync/cleanup', async (_req, res) => {
-  const status = getSyncStatus();
-  if (status.isRunning) {
-    res.json({ message: 'Sync already running' });
+  if (!startManualAction(`SKU ${sku.trim()}`)) {
+    res.json({ success: false, message: 'Ya hay una sincronización en curso' });
     return;
   }
-  res.json({ message: 'Cleanup started — comparing Odoo vs Sellibri...' });
-  syncCleanup().then(result => {
-    logger.info('api', `Cleanup finished: ${result.deleted} deleted, ${result.failed} failed, ${result.orphanSkus.length} orphans found`);
-  }).catch(err => {
-    logger.error('api', `Cleanup error: ${err.message}`);
-  });
+  try {
+    const result = await syncSingleSku(sku.trim());
+    res.json(result);
+  } catch (err: any) {
+    res.json({ success: false, message: err.message });
+  } finally {
+    endManualAction(`SKU ${sku.trim()}`);
+  }
+});
+
+app.post('/api/sync/cleanup', async (_req, res) => {
+  if (!startManualAction('Limpieza')) {
+    res.json({ message: 'Ya hay una sincronización en curso' });
+    return;
+  }
+  res.json({ message: 'Limpieza iniciada — comparando Odoo vs Sellibri...' });
+  syncCleanup()
+    .then(result => logger.info('api', `Limpieza: ${result.deleted} eliminados, ${result.failed} fallidos, ${result.orphanSkus.length} huérfanos`))
+    .catch(err => logger.error('api', `Cleanup error: ${err.message}`))
+    .finally(() => endManualAction('Limpieza'));
 });
 
 // Abort sync
 app.post('/api/sync/abort', (_req, res) => {
   const aborted = requestAbort();
+  if (aborted) {
+    // Also clear manual lock so cron can resume after abort
+    manualActionRunning = false;
+  }
   res.json({
     success: aborted,
     message: aborted ? 'Sincronización detenida' : 'No hay sincronización en curso',
   });
 });
 
-// Reset sync state (clear all mappings, force full re-sync)
+// Reset sync state
 app.post('/api/sync/reset', (_req, res) => {
   const status = getSyncStatus();
-  if (status.isRunning) {
+  if (status.isRunning || manualActionRunning) {
     res.json({ success: false, message: 'No se puede resetear mientras hay una sincronización en curso' });
     return;
   }
@@ -112,57 +141,30 @@ app.get('/health', (_req, res) => {
   res.json({ status: 'ok', uptime: process.uptime() });
 });
 
-// === Cron Jobs ===
+// === Cron: solo precio/stock cada 15 min ===
 
-// Product sync every 30 minutes (smart sync: fills empty fields, always updates price/qty)
-cron.schedule('*/30 * * * *', () => {
-  const status = getSyncStatus();
-  if (status.isRunning) {
-    logger.warn('cron', 'Skipping scheduled product sync — another sync is running');
-    return;
-  }
-  logger.info('cron', 'Triggering scheduled product sync');
-  syncProducts().catch(err => {
-    logger.error('cron', `Scheduled product sync error: ${err.message}`);
-  });
-});
-
-// Price/Stock sync every 15 minutes
 cron.schedule('*/15 * * * *', () => {
-  const status = getSyncStatus();
-  if (status.isRunning) {
-    logger.warn('cron', 'Skipping scheduled price/stock sync — another sync is running');
+  // Block if any manual action is running
+  if (manualActionRunning) {
+    logger.info('cron', 'Cron omitido — acción manual en curso');
     return;
   }
-  logger.info('cron', 'Triggering scheduled price/stock sync');
+  const status = getSyncStatus();
+  if (status.isRunning) {
+    logger.info('cron', 'Cron omitido — sync en curso');
+    return;
+  }
+  logger.info('cron', 'Cron: sincronizando precio/stock');
   syncPriceStock().catch(err => {
-    logger.error('cron', `Scheduled price/stock sync error: ${err.message}`);
+    logger.error('cron', `Cron precio/stock error: ${err.message}`);
   });
 });
 
-// Cleanup: delete orphans from Sellibri every 6 hours
-cron.schedule('0 */6 * * *', () => {
-  const status = getSyncStatus();
-  if (status.isRunning) {
-    logger.warn('cron', 'Skipping scheduled cleanup — another sync is running');
-    return;
-  }
-  logger.info('cron', 'Triggering scheduled cleanup (delete Sellibri orphans)');
-  syncCleanup().then(result => {
-    if (result.deleted > 0) {
-      logger.info('cron', `Cleanup: deleted ${result.deleted} orphan products from Sellibri`);
-    }
-  }).catch(err => {
-    logger.error('cron', `Scheduled cleanup error: ${err.message}`);
-  });
-});
-
-logger.info('server', 'Cron auto-sync ENABLED: products/30min, price-stock/15min, cleanup/6h');
+logger.info('server', 'Cron activo: precio/stock cada 15 min');
 
 // === Start Server ===
 
 app.listen(config.port, () => {
   logger.info('server', `Odoo-Sellibri integration running on port ${config.port}`);
   logger.info('server', `Dashboard: http://localhost:${config.port}`);
-  logger.info('server', `Webhook endpoint: http://localhost:${config.port}/webhook/orders`);
 });
