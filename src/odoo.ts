@@ -94,11 +94,13 @@ export async function fetchProducts(
     domain.push(['write_date', '>', lastWriteDate]);
   }
 
+  // NOTE: Do NOT include image_1920 here — it causes OOM with thousands of products.
+  // Images are fetched individually per-product in fetchProductMainImage().
   const products = await execute('product.product', 'search_read', [domain], {
     fields: [
       'name', 'default_code', 'list_price', 'qty_available', 'weight',
       'barcode', 'categ_id', 'brand_id', 'description_sale',
-      'website_description', 'image_1920', 'product_template_image_ids',
+      'website_description', 'product_template_image_ids',
       'write_date', 'sale_ok', 'type',
     ],
     offset,
@@ -158,6 +160,24 @@ export interface ProductImage {
   id: number;
   name: string;
   image_1920: string | false;
+}
+
+/** Fetch the main image (image_1920) for a single product by ID.
+ *  Returns the base64 string or null if no image exists.
+ *  This avoids loading all images in bulk which causes OOM. */
+export async function fetchProductMainImage(productId: number): Promise<string | null> {
+  try {
+    const result = await execute('product.product', 'read', [[productId]], {
+      fields: ['image_1920'],
+    });
+    if (result && result.length > 0 && result[0].image_1920 && typeof result[0].image_1920 === 'string') {
+      return result[0].image_1920;
+    }
+    return null;
+  } catch (err: any) {
+    logger.warn(MODULE, `Failed to fetch image for product ${productId}: ${err.message}`);
+    return null;
+  }
 }
 
 export async function fetchProductImages(imageIds: number[]): Promise<ProductImage[]> {

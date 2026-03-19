@@ -2,6 +2,6 @@
 builder = "nixpacks"
 
 [deploy]
-startCommand = "npm run build && npm start"
+startCommand = "npm run build && NODE_OPTIONS=--max-old-space-size=1024 npm start"
 restartPolicyType = "on_failure"
 restartPolicyMaxRetries = 5

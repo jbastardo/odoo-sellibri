@@ -101,6 +101,7 @@ export function getSyncStatus(): SyncStatus {
 
 function buildSellibriPayload(
   product: odoo.OdooProduct,
+  mainImage: string | null,
   extraImages: odoo.ProductImage[],
   includeImages: boolean,
 ): sellibri.SellibriProductPayload {
@@ -128,8 +129,8 @@ function buildSellibriPayload(
   // Only include images if they changed (or on create)
   if (includeImages) {
     const images: { image: string }[] = [];
-    if (product.image_1920 && typeof product.image_1920 === 'string') {
-      images.push({ image: product.image_1920 });
+    if (mainImage) {
+      images.push({ image: mainImage });
     }
     for (const img of extraImages) {
       if (img.image_1920 && typeof img.image_1920 === 'string') {
@@ -235,9 +236,27 @@ export async function syncProducts(): Promise<void> {
       }
 
       try {
-        // Check if images changed (avoid re-uploading heavy base64 data)
-        const currentImgHash = imageHash(product.image_1920);
-        const imagesChanged = !cached?.imageHash || cached.imageHash !== currentImgHash;
+        // Fetch main image individually (avoids OOM from bulk loading all images)
+        const needsImages = !cached; // Always fetch images for new products
+        let mainImage: string | null = null;
+        let currentImgHash = '';
+        let imagesChanged = false;
+
+        if (needsImages || !cached?.imageHash) {
+          // New product or never had images — always fetch
+          mainImage = await odoo.fetchProductMainImage(product.id);
+          currentImgHash = imageHash(mainImage || false);
+          imagesChanged = true;
+        } else {
+          // Existing product — fetch image to check if it changed
+          mainImage = await odoo.fetchProductMainImage(product.id);
+          currentImgHash = imageHash(mainImage || false);
+          imagesChanged = cached.imageHash !== currentImgHash;
+          // Release image from memory if unchanged (we won't need it)
+          if (!imagesChanged) {
+            mainImage = null;
+          }
+        }
 
         // Fetch extra images only if images changed and product has them
         let extraImages: odoo.ProductImage[] = [];
@@ -245,7 +264,7 @@ export async function syncProducts(): Promise<void> {
           extraImages = await odoo.fetchProductImages(product.product_template_image_ids);
         }
 
-        const payload = buildSellibriPayload(product, extraImages, imagesChanged || !cached);
+        const payload = buildSellibriPayload(product, mainImage, extraImages, imagesChanged || !cached);
 
         // Look up in pre-loaded catalog or state
         const existing = cached?.sellibriId
