@@ -152,28 +152,43 @@ export async function fetchAllProducts(): Promise<Map<string, SellibriProduct>> 
   const map = new Map<string, SellibriProduct>();
   let page = 1;
   const perPage = 50; // API maximum is 50
+  let consecutiveErrors = 0;
 
   while (true) {
-    const data = await apiGet('/products', { per_page: perPage, page });
-    const products: SellibriProduct[] = data.products || [];
-    if (products.length === 0) break;
+    try {
+      const data = await apiGet('/products', { per_page: perPage, page });
+      const products: SellibriProduct[] = data.products || [];
+      if (products.length === 0) break;
 
-    for (const p of products) {
-      for (const v of p.all_variants || []) {
-        if (v.sku) {
-          map.set(v.sku, p);
+      consecutiveErrors = 0; // Reset on success
+
+      for (const p of products) {
+        for (const v of p.all_variants || []) {
+          if (v.sku) {
+            map.set(v.sku, p);
+          }
         }
       }
-    }
 
-    if (page % 20 === 0 || products.length < perPage) {
-      logger.info(MODULE, `Loaded Sellibri catalog page ${page} (${map.size} SKUs total)`);
+      if (page % 20 === 0 || products.length < perPage) {
+        logger.info(MODULE, `Loaded Sellibri catalog page ${page} (${map.size} SKUs total)`);
+      }
+      if (products.length < perPage) break;
+    } catch (err: any) {
+      const status = (err as AxiosError)?.response?.status;
+      consecutiveErrors++;
+      logger.warn(MODULE, `Catalog page ${page} failed (HTTP ${status || '?'}): ${err.message} [consecutive errors: ${consecutiveErrors}]`);
+
+      // If too many consecutive errors, stop to avoid infinite loop
+      if (consecutiveErrors >= 5) {
+        logger.error(MODULE, `Too many consecutive errors loading catalog, stopping at page ${page}`);
+        break;
+      }
     }
-    if (products.length < perPage) break;
     page++;
   }
 
-  logger.info(MODULE, `Sellibri catalog fully loaded: ${page} pages, ${map.size} SKUs`);
+  logger.info(MODULE, `Sellibri catalog loaded: ${page} pages, ${map.size} SKUs`);
   return map;
 }
 
