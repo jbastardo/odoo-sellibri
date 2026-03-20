@@ -120,6 +120,35 @@ function isEmpty(val: any): boolean {
   return false;
 }
 
+/**
+ * Detect if a product name contains Odoo's copy/duplicate markers.
+ * Odoo adds "(copia)", "(Copia)", "(copy)", "(Copy)", "(copiar)" etc.
+ * when duplicating a product.
+ */
+function hasCopyMarker(name: string): boolean {
+  if (!name) return false;
+  // Match patterns like (copia), (Copia), (copy), (Copy), (copiar), (Copiar)
+  // Also handles multiple copies: (copia) (copia), (copia 2), etc.
+  return /\(copia[r]?(\s*\d*)?\)|\(copy(\s*\d*)?\)/i.test(name);
+}
+
+/**
+ * Remove Odoo's copy/duplicate markers from a product name.
+ * Examples:
+ *   "Producto X (copia)" → "Producto X"
+ *   "Producto X (Copia) (Copia)" → "Producto X"
+ *   "Producto X (copiar)" → "Producto X"
+ *   "Producto X (copy)" → "Producto X"
+ *   "Producto X (copia 2)" → "Producto X"
+ */
+function cleanTitle(name: string): string {
+  if (!name) return name;
+  return name
+    .replace(/\s*\(copia[r]?(\s*\d*)?\)/gi, '')
+    .replace(/\s*\(copy(\s*\d*)?\)/gi, '')
+    .trim();
+}
+
 function getSellibriPrice(product: odoo.OdooProduct): string {
   const pwt = product.price_with_tax;
   if (pwt && pwt > 0) return pwt.toFixed(2);
@@ -145,6 +174,11 @@ function isValidForSellibri(product: odoo.OdooProduct): boolean {
   const price = parseFloat(getSellibriPrice(product));
   if (isNaN(price) || price <= 0) return false;
   return true;
+}
+
+/** Check if an Odoo product name has copy markers — these should be skipped for title writes */
+function shouldSkipTitle(product: odoo.OdooProduct): boolean {
+  return hasCopyMarker(product.name);
 }
 
 // ─── Payload Builders ──────────────────────────────────────────
@@ -199,10 +233,12 @@ function buildSmartPayload(
     needsUpdate = true;
   }
 
-  // Title: only if empty in Sellibri
+  // Title: only if empty in Sellibri, and only if Odoo name is clean (no copy markers)
   if (isEmpty(sellibriProduct.title)) {
-    productFields.title = odooProduct.name;
-    needsUpdate = true;
+    if (!shouldSkipTitle(odooProduct)) {
+      productFields.title = cleanTitle(odooProduct.name);
+      needsUpdate = true;
+    }
   }
 
   // Description: only if empty in Sellibri
@@ -241,7 +277,7 @@ function buildSmartPayload(
 
   return {
     product: {
-      title: productFields.title || sellibriProduct.title || odooProduct.name,
+      title: productFields.title || sellibriProduct.title || cleanTitle(odooProduct.name),
       status: 'active',
       ...(productFields.description !== undefined ? { description: productFields.description } : {}),
       ...(productFields.product_vendor_id ? { product_vendor_id: productFields.product_vendor_id } : {}),
@@ -251,10 +287,17 @@ function buildSmartPayload(
   };
 }
 
-/** Build a FULL payload for creating new products. */
+/** Build a FULL payload for creating new products.
+ *  Returns null if the product name contains copy markers (should be skipped). */
 function buildFullPayload(
   odooProduct: odoo.OdooProduct,
-): sellibri.SellibriProductPayload {
+): sellibri.SellibriProductPayload | null {
+  // Skip products whose name contains copy markers — they shouldn't be created in Sellibri
+  if (shouldSkipTitle(odooProduct)) {
+    logger.warn(MODULE, `SKU=${odooProduct.default_code}: skipped — name contains copy marker: "${odooProduct.name}"`);
+    return null;
+  }
+
   const price = getSellibriPrice(odooProduct);
   const description = odooProduct.website_description || odooProduct.description_sale || '';
   const categId = Array.isArray(odooProduct.categ_id) ? odooProduct.categ_id[0] : 0;
@@ -279,7 +322,7 @@ function buildFullPayload(
 
   return {
     product: {
-      title: odooProduct.name,
+      title: cleanTitle(odooProduct.name),
       status: 'active',
       description: typeof description === 'string' ? description : '',
       ...(vendorId ? { product_vendor_id: vendorId } : {}),
@@ -450,6 +493,12 @@ export async function syncProducts(): Promise<void> {
           } else {
             // State entry is stale — product was deleted from Sellibri, create fresh
             const payload = buildFullPayload(product);
+            if (!payload) {
+              // Product has copy marker in name — skip creation
+              invalidSkipped++;
+              updateProgress(synced + created + skipped + errors + invalidSkipped, total, batchStartTime);
+              continue;
+            }
             const newProduct = await sellibri.createProduct(payload);
             sellibriId = newProduct.id;
             variantId = newProduct.all_variants?.[0]?.id || 0;
@@ -459,6 +508,12 @@ export async function syncProducts(): Promise<void> {
         } else {
           // ── TRULY NEW: not in catalog, not in state → create ──
           const payload = buildFullPayload(product);
+          if (!payload) {
+            // Product has copy marker in name — skip creation
+            invalidSkipped++;
+            updateProgress(synced + created + skipped + errors + invalidSkipped, total, batchStartTime);
+            continue;
+          }
           const newProduct = await sellibri.createProduct(payload);
           sellibriId = newProduct.id;
           variantId = newProduct.all_variants?.[0]?.id || 0;
@@ -545,18 +600,33 @@ export async function syncSingleSku(sku: string): Promise<{ success: boolean; me
       }
     }
 
+    // If product has copy marker and already exists, skip title update
+    // If product has copy marker and doesn't exist, don't create it
+    if (shouldSkipTitle(odooProduct) && !existingProduct) {
+      return { success: false, message: `SKU ${sku} tiene marcador de copia en el nombre ("${odooProduct.name}") — no se crea en Sellibri` };
+    }
+
     const payload = buildFullPayload(odooProduct);
+    if (!payload && !existingProduct) {
+      return { success: false, message: `SKU ${sku} tiene marcador de copia en el nombre — no se crea en Sellibri` };
+    }
 
     let sellibriId: number;
     let variantId: number;
 
     if (existingProduct) {
-      await sellibri.updateProduct(existingProduct.id, payload);
+      // For existing products, use smart payload (preserves Sellibri title if Odoo has copy marker)
+      const smartPayload = buildSmartPayload(odooProduct, existingProduct);
+      if (smartPayload) {
+        await sellibri.updateProduct(existingProduct.id, smartPayload);
+      }
+      // Note: even if smartPayload is null (nothing changed), we still report success
       sellibriId = existingProduct.id;
       variantId = existingProduct.all_variants?.[0]?.id || 0;
       logger.info(MODULE, `Force-updated SKU=${sku} (id=${sellibriId})`);
     } else {
-      const newProduct = await sellibri.createProduct(payload);
+      // payload is guaranteed non-null here (we returned early above if it was null and no existing product)
+      const newProduct = await sellibri.createProduct(payload!);
       sellibriId = newProduct.id;
       variantId = newProduct.all_variants?.[0]?.id || 0;
       logger.info(MODULE, `Force-created SKU=${sku} (id=${sellibriId})`);
@@ -751,8 +821,14 @@ export async function syncFixTitlesSku(): Promise<FixTitlesResult> {
       const variant = sp.all_variants?.[0];
       if (!variant) continue;
 
-      const odooTitle = (op.name || '').trim();
+      // Clean the Odoo title (remove copy markers) before comparing
+      const odooTitle = cleanTitle((op.name || '').trim());
       const sellibriTitle = (sp.title || '').trim();
+      // If Odoo title is just a copy marker with no real name, skip
+      if (!odooTitle) {
+        result.skipped++;
+        continue;
+      }
       const titleDiff = odooTitle && sellibriTitle !== odooTitle;
 
       const sellibriSku = (variant.sku || '').trim();
@@ -779,7 +855,7 @@ export async function syncFixTitlesSku(): Promise<FixTitlesResult> {
       const variant = sp.all_variants?.[0];
 
       try {
-        const odooTitle = (op.name || '').trim();
+        const odooTitle = cleanTitle((op.name || '').trim());
         const sellibriTitle = (sp.title || '').trim();
         const sellibriSku = (variant?.sku || '').trim();
 
