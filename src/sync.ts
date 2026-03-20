@@ -424,13 +424,34 @@ export async function syncProducts(): Promise<void> {
           sellibriId = existingSellibriId;
           variantId = existingVariantId;
         } else {
-          // ── NEW: create in Sellibri ──
-          const payload = buildFullPayload(product);
-          const newProduct = await sellibri.createProduct(payload);
-          sellibriId = newProduct.id;
-          variantId = newProduct.all_variants?.[0]?.id || 0;
-          created++;
-          logger.info(MODULE, `Created SKU=${sku} (id=${sellibriId})`);
+          // ── SAFETY CHECK: search Sellibri by SKU before creating ──
+          // The catalog pre-load may have missed this SKU due to pagination errors or state loss
+          logger.info(MODULE, `SKU=${sku}: not in catalog/state, verifying in Sellibri before create...`);
+          const foundInSellibri = await sellibri.findProductBySku(sku);
+
+          if (foundInSellibri) {
+            // Product already exists — update instead of creating a duplicate
+            logger.warn(MODULE, `SKU=${sku}: FOUND in Sellibri (id=${foundInSellibri.id}) — updating instead of creating to prevent duplicate`);
+            const wasDraft = foundInSellibri.status !== 'active';
+            const smartPayload = buildSmartPayload(product, foundInSellibri);
+            if (smartPayload) {
+              await sellibri.updateProduct(foundInSellibri.id, smartPayload);
+              synced++;
+              if (wasDraft) activated++;
+            } else {
+              skipped++;
+            }
+            sellibriId = foundInSellibri.id;
+            variantId = foundInSellibri.all_variants?.[0]?.id || 0;
+          } else {
+            // Truly new — safe to create
+            const payload = buildFullPayload(product);
+            const newProduct = await sellibri.createProduct(payload);
+            sellibriId = newProduct.id;
+            variantId = newProduct.all_variants?.[0]?.id || 0;
+            created++;
+            logger.info(MODULE, `Created SKU=${sku} (id=${sellibriId})`);
+          }
         }
 
         const odooPrice = getSellibriPrice(product);
@@ -500,13 +521,22 @@ export async function syncSingleSku(sku: string): Promise<{ success: boolean; me
       return { success: false, message: `SKU ${sku} no encontrado en Odoo` };
     }
 
-    // Check local state first, then fetch by ID — no full catalog scan
+    // 1. Check local state first
     const state = loadState();
     const cached = state.products[sku];
     let existingProduct: sellibri.SellibriProduct | null = null;
 
     if (cached?.sellibriId) {
       existingProduct = await sellibri.fetchProductById(cached.sellibriId);
+    }
+
+    // 2. If not in state, search Sellibri catalog to prevent duplicates
+    if (!existingProduct) {
+      logger.info(MODULE, `SKU=${sku}: not in local state, searching Sellibri catalog...`);
+      existingProduct = await sellibri.findProductBySku(sku);
+      if (existingProduct) {
+        logger.warn(MODULE, `SKU=${sku}: found in Sellibri (id=${existingProduct.id}) — will update, not create`);
+      }
     }
 
     const payload = buildFullPayload(odooProduct);
@@ -540,7 +570,7 @@ export async function syncSingleSku(sku: string): Promise<{ success: boolean; me
     return {
       success: true,
       message: existingProduct
-        ? `SKU ${sku} actualizado y activado`
+        ? `SKU ${sku} actualizado (existente en Sellibri)`
         : `SKU ${sku} creado en Sellibri`,
     };
   } catch (err: any) {

@@ -206,6 +206,45 @@ export async function fetchAllProducts(): Promise<Map<string, SellibriProduct>> 
   return map;
 }
 
+/** Search for a product by SKU in Sellibri by scanning all pages.
+ *  Used as a safety check before creating to prevent duplicates.
+ *  Returns the product if found, null otherwise. */
+export async function findProductBySku(sku: string): Promise<SellibriProduct | null> {
+  let page = 1;
+  const perPage = 50;
+  let consecutiveErrors = 0;
+
+  while (true) {
+    try {
+      const data = await apiGet('/products', { per_page: perPage, page });
+      const products: SellibriProduct[] = data.products || [];
+      if (products.length === 0) break;
+
+      consecutiveErrors = 0;
+
+      for (const p of products) {
+        for (const v of p.all_variants || []) {
+          if (v.sku === sku) {
+            logger.info(MODULE, `findProductBySku: found SKU=${sku} → id=${p.id} on page ${page}`);
+            return p;
+          }
+        }
+      }
+
+      if (products.length < perPage) break;
+    } catch (err: any) {
+      consecutiveErrors++;
+      if (consecutiveErrors >= 3) {
+        logger.warn(MODULE, `findProductBySku: giving up after ${consecutiveErrors} errors on page ${page}`);
+        break;
+      }
+    }
+    page++;
+  }
+
+  return null;
+}
+
 /** Fetch a single Sellibri product by its ID */
 export async function fetchProductById(id: number): Promise<SellibriProduct | null> {
   try {
