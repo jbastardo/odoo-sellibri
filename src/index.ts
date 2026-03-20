@@ -117,7 +117,7 @@ app.post('/api/sync/fix-titles-sku', async (_req, res) => {
   }
   res.json({ message: 'Corrección de títulos y SKU iniciada' });
   syncFixTitlesSku()
-    .then(result => logger.info('api', `Fix títulos/SKU: ${result.titleFixed} títulos corregidos, ${result.skuFixed} SKUs corregidos, ${result.skipped} sin cambios, ${result.errors} errores`))
+    .then(result => logger.info('api', `Fix títulos/SKU: ${result.titleFixed} títulos, ${result.skuFixed} SKUs, ${result.slugFixed} slugs corregidos, ${result.skipped} sin cambios, ${result.errors} errores`))
     .catch(err => logger.error('api', `Fix títulos/SKU error: ${err.message}`))
     .finally(() => endManualAction('Corregir Títulos/SKU'));
 });

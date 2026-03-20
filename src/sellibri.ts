@@ -161,6 +161,7 @@ export interface SellibriVariantDetail {
 export interface SellibriProduct {
   id: number;
   title: string;
+  slug: string;
   status: string;
   description: string | null;
   product_vendor_id: number | null;

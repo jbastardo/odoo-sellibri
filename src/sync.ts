@@ -215,6 +215,12 @@ function buildSmartPayload(
     needsUpdate = true;
   }
 
+  // Slug: set to SKU if different
+  if (sellibriProduct.slug !== odooProduct.default_code) {
+    productFields.slug = odooProduct.default_code;
+    needsUpdate = true;
+  }
+
   // Price — update if different
   const currentPrice = parseFloat(variant.price || '0');
   const newPrice = parseFloat(odooPrice);
@@ -278,6 +284,7 @@ function buildSmartPayload(
   return {
     product: {
       title: productFields.title || sellibriProduct.title || cleanTitle(odooProduct.name),
+      ...(productFields.slug ? { slug: productFields.slug } : {}),
       status: 'active',
       ...(productFields.description !== undefined ? { description: productFields.description } : {}),
       ...(productFields.product_vendor_id ? { product_vendor_id: productFields.product_vendor_id } : {}),
@@ -323,6 +330,7 @@ function buildFullPayload(
   return {
     product: {
       title: cleanTitle(odooProduct.name),
+      slug: odooProduct.default_code,
       status: 'active',
       description: typeof description === 'string' ? description : '',
       ...(vendorId ? { product_vendor_id: vendorId } : {}),
@@ -777,6 +785,7 @@ export interface FixTitlesResult {
   matched: number;
   titleFixed: number;
   skuFixed: number;
+  slugFixed: number;
   skipped: number;
   errors: number;
 }
@@ -784,14 +793,14 @@ export interface FixTitlesResult {
 export async function syncFixTitlesSku(): Promise<FixTitlesResult> {
   if (fixTitlesRunning || productSyncRunning || stockSyncRunning) {
     logger.warn(MODULE, 'Fix titles: another sync is running, skipping');
-    return { total: 0, matched: 0, titleFixed: 0, skuFixed: 0, skipped: 0, errors: 0 };
+    return { total: 0, matched: 0, titleFixed: 0, skuFixed: 0, slugFixed: 0, skipped: 0, errors: 0 };
   }
   fixTitlesRunning = true;
   syncStatus.isRunning = true;
   syncStatus.lastError = null;
 
   const result: FixTitlesResult = {
-    total: 0, matched: 0, titleFixed: 0, skuFixed: 0, skipped: 0, errors: 0,
+    total: 0, matched: 0, titleFixed: 0, skuFixed: 0, slugFixed: 0, skipped: 0, errors: 0,
   };
 
   try {
@@ -834,7 +843,10 @@ export async function syncFixTitlesSku(): Promise<FixTitlesResult> {
       const sellibriSku = (variant.sku || '').trim();
       const skuDiff = sku && sellibriSku !== sku;
 
-      if (titleDiff || skuDiff) {
+      const sellibriSlug = (sp.slug || '').trim();
+      const slugDiff = sku && sellibriSlug !== sku;
+
+      if (titleDiff || skuDiff || slugDiff) {
         toFix.push({ odoo: op, sellibri: sp });
       } else {
         result.skipped++;
@@ -861,17 +873,20 @@ export async function syncFixTitlesSku(): Promise<FixTitlesResult> {
 
         const titleNeedsFix = odooTitle && sellibriTitle !== odooTitle;
         const skuNeedsFix = sku && sellibriSku !== sku;
+        const slugNeedsFix = sku && (sp.slug || '').trim() !== sku;
 
         const payload: sellibri.SellibriProductPayload = { product: {} };
 
         if (titleNeedsFix) payload.product.title = odooTitle;
         if (skuNeedsFix) payload.product.master_attributes = { sku };
+        if (slugNeedsFix) payload.product.slug = sku;
         if (!payload.product.title) payload.product.title = sellibriTitle || odooTitle;
 
         await sellibri.updateProduct(sp.id, payload);
 
         if (titleNeedsFix) result.titleFixed++;
         if (skuNeedsFix) result.skuFixed++;
+        if (slugNeedsFix) result.slugFixed++;
       } catch (err: any) {
         result.errors++;
         logger.error(MODULE, `Fix title error SKU=${sku}: ${err.message}`);
@@ -880,12 +895,12 @@ export async function syncFixTitlesSku(): Promise<FixTitlesResult> {
       updateProgress(i + 1, total, batchStartTime, 'Corrigiendo títulos/SKU:');
 
       if ((i + 1) % 50 === 0) {
-        logger.info(MODULE, `Fix titles: ${i + 1}/${total} (titles=${result.titleFixed}, skus=${result.skuFixed}, errors=${result.errors})`);
+        logger.info(MODULE, `Fix titles: ${i + 1}/${total} (titles=${result.titleFixed}, skus=${result.skuFixed}, slugs=${result.slugFixed}, errors=${result.errors})`);
       }
     }
 
     const totalTime = ((Date.now() - batchStartTime) / 1000 / 60).toFixed(1);
-    logger.info(MODULE, `Fix titles ${abortRequested ? 'ABORTED' : 'complete'} in ${totalTime}min: ${result.titleFixed} titles, ${result.skuFixed} SKUs, ${result.errors} errors`);
+    logger.info(MODULE, `Fix titles ${abortRequested ? 'ABORTED' : 'complete'} in ${totalTime}min: ${result.titleFixed} titles, ${result.skuFixed} SKUs, ${result.slugFixed} slugs, ${result.errors} errors`);
   } catch (err: any) {
     syncStatus.lastError = err.message;
     logger.error(MODULE, `Fix titles failed: ${err.message}`);
