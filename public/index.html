@@ -72,6 +72,10 @@
         class="bg-teal-600 hover:bg-teal-700 disabled:opacity-50 disabled:cursor-not-allowed text-white px-4 py-2 rounded-lg font-medium transition">
         📝 Corregir Títulos/SKU
       </button>
+      <button onclick="triggerImageSync()" id="btn-images"
+        class="bg-pink-600 hover:bg-pink-700 disabled:opacity-50 disabled:cursor-not-allowed text-white px-4 py-2 rounded-lg font-medium transition">
+        🖼️ Sync Imágenes
+      </button>
 
       <button onclick="abortSync()" id="btn-abort"
         class="hidden bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-lg font-medium transition">
@@ -182,6 +186,7 @@
         const btnAbort = document.getElementById('btn-abort');
         const btnCleanup = document.getElementById('btn-cleanup');
         const btnFixTitles = document.getElementById('btn-fix-titles');
+        const btnImages = document.getElementById('btn-images');
 
         if (sync.isRunning) {
           statusEl.textContent = 'Sincronizando...';
@@ -190,6 +195,7 @@
           btnStock.disabled = true;
           btnCleanup.disabled = true;
           btnFixTitles.disabled = true;
+          btnImages.disabled = true;
           btnAbort.classList.remove('hidden');
         } else {
           statusEl.textContent = 'Inactivo';
@@ -198,6 +204,7 @@
           btnStock.disabled = false;
           btnCleanup.disabled = false;
           btnFixTitles.disabled = false;
+          btnImages.disabled = false;
           btnAbort.classList.add('hidden');
         }
 
@@ -264,10 +271,7 @@
     async function triggerFixTitles() {
       if (!confirm('¿Iniciar corrección de títulos y SKU?\nEsto comparará Odoo con Sellibri y corregirá las diferencias.')) return;
       try {
-        document.getElementById('btn-products').disabled = true;
-        document.getElementById('btn-stock').disabled = true;
-        document.getElementById('btn-cleanup').disabled = true;
-        document.getElementById('btn-fix-titles').disabled = true;
+        disableAllActions();
         await fetch('/api/sync/fix-titles-sku', { method: 'POST' });
         setTimeout(fetchStatus, 1000);
       } catch (err) {
@@ -277,10 +281,7 @@
 
     async function triggerSync(type) {
       try {
-        document.getElementById('btn-products').disabled = true;
-        document.getElementById('btn-stock').disabled = true;
-        document.getElementById('btn-cleanup').disabled = true;
-        document.getElementById('btn-fix-titles').disabled = true;
+        disableAllActions();
         await fetch(`/api/sync/${type}`, { method: 'POST' });
         setTimeout(fetchStatus, 1000);
       } catch (err) {
@@ -291,10 +292,7 @@
     async function triggerCleanup() {
       if (!confirm('¿Iniciar limpieza?\nEsto eliminará de Sellibri los productos que no existen en Odoo.')) return;
       try {
-        document.getElementById('btn-products').disabled = true;
-        document.getElementById('btn-stock').disabled = true;
-        document.getElementById('btn-cleanup').disabled = true;
-        document.getElementById('btn-fix-titles').disabled = true;
+        disableAllActions();
         await fetch('/api/sync/cleanup', { method: 'POST' });
         setTimeout(fetchStatus, 1000);
       } catch (err) {
@@ -303,6 +301,25 @@
     }
 
 
+
+    function disableAllActions() {
+      document.getElementById('btn-products').disabled = true;
+      document.getElementById('btn-stock').disabled = true;
+      document.getElementById('btn-cleanup').disabled = true;
+      document.getElementById('btn-fix-titles').disabled = true;
+      document.getElementById('btn-images').disabled = true;
+    }
+
+    async function triggerImageSync() {
+      if (!confirm('¿Sincronizar imágenes de Odoo a Sellibri?\nSolo se procesarán productos sin imágenes en Sellibri.')) return;
+      try {
+        disableAllActions();
+        await fetch('/api/sync/images', { method: 'POST' });
+        setTimeout(fetchStatus, 1000);
+      } catch (err) {
+        alert('Error: ' + err.message);
+      }
+    }
 
     async function forceSyncSku() {
       const input = document.getElementById('sku-input');

@@ -3,7 +3,7 @@ import * as cron from 'node-cron';
 import * as path from 'path';
 import { config } from './config';
 import { logger } from './logger';
-import { syncProducts, syncPriceStock, syncSingleSku, syncPhotos, syncCleanup, syncFixTitlesSku, getSyncStatus, requestAbort, resetSyncState } from './sync';
+import { syncProducts, syncPriceStock, syncSingleSku, syncPhotos, syncCleanup, syncFixTitlesSku, syncSingleSkuImages, syncImagesAll, getSyncStatus, requestAbort, resetSyncState } from './sync';
 import { fetchExcludedProducts } from './odoo';
 import { handleOrderWebhook, getRecentOrders } from './webhook';
 
@@ -120,6 +120,40 @@ app.post('/api/sync/fix-titles-sku', async (_req, res) => {
     .then(result => logger.info('api', `Fix títulos/SKU: ${result.titleFixed} títulos, ${result.skuFixed} SKUs, ${result.slugFixed} slugs corregidos, ${result.skipped} sin cambios, ${result.errors} errores`))
     .catch(err => logger.error('api', `Fix títulos/SKU error: ${err.message}`))
     .finally(() => endManualAction('Corregir Títulos/SKU'));
+});
+
+// Image sync: single SKU (test)
+app.post('/api/sync/images/:sku', async (req, res) => {
+  const { sku } = req.params;
+  if (!sku || sku.trim() === '') {
+    res.status(400).json({ success: false, message: 'SKU requerido' });
+    return;
+  }
+  if (!startManualAction(`Imágenes SKU ${sku.trim()}`)) {
+    res.json({ success: false, message: 'Ya hay una sincronización en curso' });
+    return;
+  }
+  try {
+    const result = await syncSingleSkuImages(sku.trim());
+    res.json(result);
+  } catch (err: any) {
+    res.json({ success: false, message: err.message });
+  } finally {
+    endManualAction(`Imágenes SKU ${sku.trim()}`);
+  }
+});
+
+// Image sync: all products
+app.post('/api/sync/images', async (_req, res) => {
+  if (!startManualAction('Sync Imágenes')) {
+    res.json({ message: 'Ya hay una sincronización en curso' });
+    return;
+  }
+  res.json({ message: 'Sincronización de imágenes iniciada' });
+  syncImagesAll()
+    .then(result => logger.info('api', `Sync imágenes: ${result.uploaded} subidas, ${result.skippedHasImages} ya tenían, ${result.skippedNoOdooImage} sin imagen Odoo, ${result.errors} errores`))
+    .catch(err => logger.error('api', `Sync imágenes error: ${err.message}`))
+    .finally(() => endManualAction('Sync Imágenes'));
 });
 
 // Abort sync

@@ -74,10 +74,16 @@ export interface OdooProduct {
   description_sale: string | false;
   website_description: string | false;
   image_1920: string | false;
+  product_tmpl_id: [number, string] | false;
   product_template_image_ids: number[];
   write_date: string;
   sale_ok: boolean;
   type: string;
+}
+
+export interface OdooProductImageUrls {
+  mainUrl: string | null;
+  additionalUrls: { id: number; url: string; position: number }[];
 }
 
 export async function fetchProducts(
@@ -101,7 +107,7 @@ export async function fetchProducts(
     fields: [
       'name', 'default_code', 'list_price', 'price_with_tax', 'qty_available', 'weight',
       'barcode', 'categ_id', 'brand_id', 'description_sale',
-      'website_description', 'product_template_image_ids',
+      'website_description', 'product_tmpl_id', 'product_template_image_ids',
       'write_date', 'sale_ok', 'type',
     ],
     offset,
@@ -190,6 +196,66 @@ export async function fetchProductImages(imageIds: number[]): Promise<ProductIma
   return images as ProductImage[];
 }
 
+/** Build public image URLs for an Odoo product.
+ *  - Main image: /web/image/product.product/{id}/image_1920
+ *  - Additional images: /web/image/product.image/{image_id}/image_1920
+ *  Uses product_template_image_ids for extra images (model: product.image). */
+export function buildImageUrls(product: OdooProduct): OdooProductImageUrls {
+  const baseUrl = config.odoo.url.replace(/\/$/, '');
+  const result: OdooProductImageUrls = {
+    mainUrl: null,
+    additionalUrls: [],
+  };
+
+  // Main image — uses the product.product ID
+  // We check if image_1920 exists (truthy = has image)
+  // But since we don't fetch image_1920 in bulk, we always generate the URL
+  // and let Sellibri try to fetch it (it returns a placeholder if no image)
+  result.mainUrl = `${baseUrl}/web/image/product.product/${product.id}/image_1920`;
+
+  // Additional images from product.image model
+  if (product.product_template_image_ids && product.product_template_image_ids.length > 0) {
+    for (let i = 0; i < product.product_template_image_ids.length; i++) {
+      const imageId = product.product_template_image_ids[i];
+      result.additionalUrls.push({
+        id: imageId,
+        url: `${baseUrl}/web/image/product.image/${imageId}/image_1920`,
+        position: i + 2, // position 1 = main image, 2+ = additional
+      });
+    }
+  }
+
+  return result;
+}
+
+/** Fetch additional image IDs from product.template if product.product doesn't have them.
+ *  Some Odoo configs only store extra images on the template level. */
+export async function fetchTemplateImageIds(templateId: number): Promise<number[]> {
+  try {
+    const tmpl = await execute('product.template', 'read', [[templateId]], {
+      fields: ['product_template_image_ids'],
+    });
+    if (tmpl && tmpl[0]?.product_template_image_ids) {
+      return tmpl[0].product_template_image_ids;
+    }
+  } catch (err: any) {
+    logger.warn(MODULE, `Failed to fetch template images for template ${templateId}: ${err.message}`);
+  }
+  return [];
+}
+
+/** Check if a product has a real main image (not a placeholder) by checking image_1920 field */
+export async function productHasImage(productId: number): Promise<boolean> {
+  try {
+    const result = await execute('product.product', 'read', [[productId]], {
+      fields: ['image_1920'],
+    });
+    return !!(result && result[0] && result[0].image_1920);
+  } catch {
+    return false;
+  }
+}
+
 export async function fetchStockQuants(productIds: number[]): Promise<Record<number, number>> {
   if (productIds.length === 0) return {};
 
@@ -247,7 +313,7 @@ export async function fetchProductBySku(sku: string): Promise<OdooProduct | null
     fields: [
       'name', 'default_code', 'list_price', 'price_with_tax', 'qty_available', 'weight',
       'barcode', 'categ_id', 'brand_id', 'description_sale',
-      'website_description', 'product_template_image_ids',
+      'website_description', 'product_tmpl_id', 'product_template_image_ids',
       'write_date', 'sale_ok', 'type',
     ],
     limit: 1,

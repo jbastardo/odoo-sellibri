@@ -239,12 +239,11 @@ function buildSmartPayload(
     needsUpdate = true;
   }
 
-  // Title: only if empty in Sellibri, and only if Odoo name is clean (no copy markers)
-  if (isEmpty(sellibriProduct.title)) {
-    if (!shouldSkipTitle(odooProduct)) {
-      productFields.title = cleanTitle(odooProduct.name);
-      needsUpdate = true;
-    }
+  // Title: update if empty in Sellibri, or if different from cleaned Odoo name
+  const cleanedTitle = cleanTitle(odooProduct.name);
+  if (cleanedTitle && (isEmpty(sellibriProduct.title) || sellibriProduct.title !== cleanedTitle)) {
+    productFields.title = cleanedTitle;
+    needsUpdate = true;
   }
 
   // Description: only if empty in Sellibri
@@ -295,21 +294,33 @@ function buildSmartPayload(
 }
 
 /** Build a FULL payload for creating new products.
- *  Returns null if the product name contains copy markers (should be skipped). */
+ *  Copy markers like (copia)/(copiar) are automatically cleaned from the title. */
 function buildFullPayload(
   odooProduct: odoo.OdooProduct,
-): sellibri.SellibriProductPayload | null {
-  // Skip products whose name contains copy markers — they shouldn't be created in Sellibri
-  if (shouldSkipTitle(odooProduct)) {
-    logger.warn(MODULE, `SKU=${odooProduct.default_code}: skipped — name contains copy marker: "${odooProduct.name}"`);
-    return null;
-  }
-
+): sellibri.SellibriProductPayload {
   const price = getSellibriPrice(odooProduct);
   const description = odooProduct.website_description || odooProduct.description_sale || '';
   const categId = Array.isArray(odooProduct.categ_id) ? odooProduct.categ_id[0] : 0;
   const taxonId = mapCategory(categId);
   const vendorId = mapBrandToVendor(odooProduct.brand_id);
+
+  // Build image attributes from Odoo URLs
+  const imageUrls = odoo.buildImageUrls(odooProduct);
+  const imagesAttrs: sellibri.SellibriImageAttribute[] = [];
+  if (imageUrls.mainUrl) {
+    imagesAttrs.push({
+      remote_url: imageUrls.mainUrl,
+      position: 1,
+      alt: cleanTitle(odooProduct.name),
+    });
+  }
+  for (const extra of imageUrls.additionalUrls) {
+    imagesAttrs.push({
+      remote_url: extra.url,
+      position: extra.position,
+      alt: cleanTitle(odooProduct.name),
+    });
+  }
 
   const masterAttrs: sellibri.SellibriMasterAttributes = {
     sku: odooProduct.default_code,
@@ -325,6 +336,7 @@ function buildFullPayload(
       stock_location_id: config.sellibri.stockLocationId,
       available: Math.max(0, Math.floor(odooProduct.qty_available || 0)),
     }],
+    ...(imagesAttrs.length > 0 ? { images_attributes: imagesAttrs } : {}),
   };
 
   return {
@@ -501,12 +513,6 @@ export async function syncProducts(): Promise<void> {
           } else {
             // State entry is stale — product was deleted from Sellibri, create fresh
             const payload = buildFullPayload(product);
-            if (!payload) {
-              // Product has copy marker in name — skip creation
-              invalidSkipped++;
-              updateProgress(synced + created + skipped + errors + invalidSkipped, total, batchStartTime);
-              continue;
-            }
             const newProduct = await sellibri.createProduct(payload);
             sellibriId = newProduct.id;
             variantId = newProduct.all_variants?.[0]?.id || 0;
@@ -516,12 +522,6 @@ export async function syncProducts(): Promise<void> {
         } else {
           // ── TRULY NEW: not in catalog, not in state → create ──
           const payload = buildFullPayload(product);
-          if (!payload) {
-            // Product has copy marker in name — skip creation
-            invalidSkipped++;
-            updateProgress(synced + created + skipped + errors + invalidSkipped, total, batchStartTime);
-            continue;
-          }
           const newProduct = await sellibri.createProduct(payload);
           sellibriId = newProduct.id;
           variantId = newProduct.all_variants?.[0]?.id || 0;
@@ -608,33 +608,22 @@ export async function syncSingleSku(sku: string): Promise<{ success: boolean; me
       }
     }
 
-    // If product has copy marker and already exists, skip title update
-    // If product has copy marker and doesn't exist, don't create it
-    if (shouldSkipTitle(odooProduct) && !existingProduct) {
-      return { success: false, message: `SKU ${sku} tiene marcador de copia en el nombre ("${odooProduct.name}") — no se crea en Sellibri` };
-    }
-
     const payload = buildFullPayload(odooProduct);
-    if (!payload && !existingProduct) {
-      return { success: false, message: `SKU ${sku} tiene marcador de copia en el nombre — no se crea en Sellibri` };
-    }
 
     let sellibriId: number;
     let variantId: number;
 
     if (existingProduct) {
-      // For existing products, use smart payload (preserves Sellibri title if Odoo has copy marker)
+      // For existing products, use smart payload (updates only changed fields)
       const smartPayload = buildSmartPayload(odooProduct, existingProduct);
       if (smartPayload) {
         await sellibri.updateProduct(existingProduct.id, smartPayload);
       }
-      // Note: even if smartPayload is null (nothing changed), we still report success
       sellibriId = existingProduct.id;
       variantId = existingProduct.all_variants?.[0]?.id || 0;
       logger.info(MODULE, `Force-updated SKU=${sku} (id=${sellibriId})`);
     } else {
-      // payload is guaranteed non-null here (we returned early above if it was null and no existing product)
-      const newProduct = await sellibri.createProduct(payload!);
+      const newProduct = await sellibri.createProduct(payload);
       sellibriId = newProduct.id;
       variantId = newProduct.all_variants?.[0]?.id || 0;
       logger.info(MODULE, `Force-created SKU=${sku} (id=${sellibriId})`);
@@ -1063,4 +1052,235 @@ export async function syncPriceStock(): Promise<void> {
     syncStatus.isRunning = productSyncRunning;
     syncStatus.progress = null;
   }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// IMAGE SYNC — Upload images from Odoo to Sellibri via remote_url
+// ═══════════════════════════════════════════════════════════════
+
+export interface ImageSyncResult {
+  success: boolean;
+  message: string;
+  imagesUploaded: number;
+  details?: {
+    mainUrl: string | null;
+    additionalUrls: string[];
+    sellibriResponse?: any;
+  };
+}
+
+/** Sync images for a single SKU — test/debug function */
+export async function syncSingleSkuImages(sku: string): Promise<ImageSyncResult> {
+  logger.info(MODULE, `Image sync for SKU=${sku}...`);
+
+  try {
+    // 1. Get product from Odoo
+    const odooProduct = await odoo.fetchProductBySku(sku);
+    if (!odooProduct) {
+      return { success: false, message: `SKU ${sku} no encontrado en Odoo`, imagesUploaded: 0 };
+    }
+
+    // 2. Check if product has an image in Odoo
+    const hasImage = await odoo.productHasImage(odooProduct.id);
+    if (!hasImage) {
+      return { success: false, message: `SKU ${sku} no tiene imagen principal en Odoo`, imagesUploaded: 0 };
+    }
+
+    // 3. Build image URLs
+    const imageUrls = odoo.buildImageUrls(odooProduct);
+    logger.info(MODULE, `SKU=${sku}: main=${imageUrls.mainUrl}, additional=${imageUrls.additionalUrls.length}`);
+
+    // 4. Find product in Sellibri
+    const catalog = await sellibri.getCatalog();
+    const sellibriProduct = catalog.get(sku);
+    if (!sellibriProduct) {
+      return { success: false, message: `SKU ${sku} no encontrado en Sellibri — sincroniza productos primero`, imagesUploaded: 0 };
+    }
+
+    // 5. Build images_attributes payload
+    const imagesAttrs: sellibri.SellibriImageAttribute[] = [];
+    const title = cleanTitle(odooProduct.name);
+
+    if (imageUrls.mainUrl) {
+      imagesAttrs.push({
+        remote_url: imageUrls.mainUrl,
+        position: 1,
+        alt: title,
+      });
+    }
+    for (const extra of imageUrls.additionalUrls) {
+      imagesAttrs.push({
+        remote_url: extra.url,
+        position: extra.position,
+        alt: title,
+      });
+    }
+
+    if (imagesAttrs.length === 0) {
+      return { success: false, message: `SKU ${sku} no tiene imágenes en Odoo`, imagesUploaded: 0 };
+    }
+
+    // 6. Send to Sellibri
+    const payload: sellibri.SellibriProductPayload = {
+      product: {
+        master_attributes: {
+          images_attributes: imagesAttrs,
+        },
+      },
+    };
+
+    logger.info(MODULE, `SKU=${sku}: sending ${imagesAttrs.length} images to Sellibri (id=${sellibriProduct.id})`);
+    logger.info(MODULE, `Payload: ${JSON.stringify(payload, null, 2)}`);
+
+    const result = await sellibri.updateProduct(sellibriProduct.id, payload);
+
+    return {
+      success: true,
+      message: `SKU ${sku}: ${imagesAttrs.length} imágenes enviadas a Sellibri`,
+      imagesUploaded: imagesAttrs.length,
+      details: {
+        mainUrl: imageUrls.mainUrl,
+        additionalUrls: imageUrls.additionalUrls.map(u => u.url),
+        sellibriResponse: result,
+      },
+    };
+  } catch (err: any) {
+    const responseData = err?.response?.data;
+    const msg = responseData ? JSON.stringify(responseData) : err.message;
+    logger.error(MODULE, `Image sync SKU=${sku} failed: ${msg}`);
+    return { success: false, message: `Error: ${msg}`, imagesUploaded: 0 };
+  }
+}
+
+// ─── Batch Image Sync ─────────────────────────────────────────────
+
+let imageSyncRunning = false;
+
+export interface BatchImageSyncResult {
+  total: number;
+  matched: number;
+  uploaded: number;
+  skippedHasImages: number;
+  skippedNoOdooImage: number;
+  errors: number;
+}
+
+/** Batch sync images for all products: sends Odoo image URLs to Sellibri.
+ *  Only processes products that currently have NO images in Sellibri. */
+export async function syncImagesAll(): Promise<BatchImageSyncResult> {
+  if (imageSyncRunning || productSyncRunning || stockSyncRunning) {
+    logger.warn(MODULE, 'Image sync: another sync is running, skipping');
+    return { total: 0, matched: 0, uploaded: 0, skippedHasImages: 0, skippedNoOdooImage: 0, errors: 0 };
+  }
+  imageSyncRunning = true;
+  syncStatus.isRunning = true;
+  syncStatus.lastError = null;
+
+  const result: BatchImageSyncResult = {
+    total: 0, matched: 0, uploaded: 0, skippedHasImages: 0, skippedNoOdooImage: 0, errors: 0,
+  };
+
+  try {
+    syncStatus.progress = {
+      current: 0, total: 0,
+      phase: 'Sync Imágenes: cargando catálogos...',
+      startedAt: new Date().toISOString(),
+      estimatedSecondsLeft: null,
+    };
+
+    const catalog = await sellibri.getCatalog();
+    const odooProducts = await odoo.fetchAllProducts();
+    logger.info(MODULE, `Image sync: ${catalog.size} Sellibri, ${odooProducts.length} Odoo`);
+
+    // Build list of products that need images
+    const toProcess: { odoo: odoo.OdooProduct; sellibri: sellibri.SellibriProduct }[] = [];
+
+    for (const op of odooProducts) {
+      const sku = op.default_code;
+      if (!sku) continue;
+      result.total++;
+
+      const sp = catalog.get(sku);
+      if (!sp) continue;
+      result.matched++;
+
+      // Skip if Sellibri product already has images
+      const variant = sp.all_variants?.[0];
+      if (variant?.images && variant.images.length > 0) {
+        result.skippedHasImages++;
+        continue;
+      }
+
+      // Skip if Odoo product has no images
+      if (!op.product_template_image_ids || op.product_template_image_ids.length === 0) {
+        // Only has main image (no additional), still worth syncing
+        // We’ll check main image existence during processing
+      }
+
+      toProcess.push({ odoo: op, sellibri: sp });
+    }
+
+    logger.info(MODULE, `Image sync: ${toProcess.length} products need images, ${result.skippedHasImages} already have images`);
+    if (toProcess.length === 0) return result;
+
+    const total = toProcess.length;
+    const batchStartTime = Date.now();
+
+    for (let i = 0; i < toProcess.length; i++) {
+      if (abortRequested) break;
+
+      const { odoo: op, sellibri: sp } = toProcess[i];
+      const sku = op.default_code;
+
+      try {
+        const imageUrls = odoo.buildImageUrls(op);
+        const title = cleanTitle(op.name);
+        const imagesAttrs: sellibri.SellibriImageAttribute[] = [];
+
+        if (imageUrls.mainUrl) {
+          imagesAttrs.push({ remote_url: imageUrls.mainUrl, position: 1, alt: title });
+        }
+        for (const extra of imageUrls.additionalUrls) {
+          imagesAttrs.push({ remote_url: extra.url, position: extra.position, alt: title });
+        }
+
+        if (imagesAttrs.length === 0) {
+          result.skippedNoOdooImage++;
+          continue;
+        }
+
+        await sellibri.updateProduct(sp.id, {
+          product: {
+            master_attributes: {
+              images_attributes: imagesAttrs,
+            },
+          },
+        });
+
+        result.uploaded++;
+      } catch (err: any) {
+        result.errors++;
+        logger.error(MODULE, `Image sync error SKU=${sku}: ${err.message}`);
+      }
+
+      updateProgress(i + 1, total, batchStartTime, 'Sync Imágenes:');
+
+      if ((i + 1) % 50 === 0) {
+        logger.info(MODULE, `Image sync: ${i + 1}/${total} (uploaded=${result.uploaded}, skippedNoImage=${result.skippedNoOdooImage}, errors=${result.errors})`);
+      }
+    }
+
+    const totalTime = ((Date.now() - batchStartTime) / 1000 / 60).toFixed(1);
+    logger.info(MODULE, `Image sync ${abortRequested ? 'ABORTED' : 'complete'} in ${totalTime}min: ${result.uploaded} uploaded, ${result.skippedHasImages} already had images, ${result.skippedNoOdooImage} no Odoo image, ${result.errors} errors`);
+  } catch (err: any) {
+    syncStatus.lastError = err.message;
+    logger.error(MODULE, `Image sync failed: ${err.message}`);
+  } finally {
+    imageSyncRunning = false;
+    abortRequested = false;
+    syncStatus.isRunning = productSyncRunning || stockSyncRunning;
+    syncStatus.progress = null;
+  }
+
+  return result;
 }

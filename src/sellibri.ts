@@ -120,6 +120,13 @@ async function apiDelete<T = any>(path: string): Promise<T> {
 
 // ─── Interfaces ────────────────────────────────────────────────
 
+export interface SellibriImageAttribute {
+  remote_url?: string;
+  base64_data?: string;
+  position?: number;
+  alt?: string;
+}
+
 export interface SellibriMasterAttributes {
   sku?: string;
   price?: string;
@@ -131,6 +138,7 @@ export interface SellibriMasterAttributes {
   track_inventory?: boolean;
   tax_rate_id?: number;
   stock_items_attributes?: { stock_location_id: number; available: number }[];
+  images_attributes?: SellibriImageAttribute[];
 }
 
 export interface SellibriProductPayload {
