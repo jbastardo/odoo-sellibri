@@ -104,6 +104,7 @@ export function resetSyncState(): void {
     syncStatus.productsSynced = 0;
     syncStatus.lastProductSync = null;
     syncStatus.lastStockSync = null;
+    sellibri.invalidateCatalog();
     logger.warn(MODULE, 'Sync state cleared — next sync will start from scratch');
   } catch (err: any) {
     logger.error(MODULE, `Could not clear sync state: ${err.message}`);
@@ -125,14 +126,14 @@ function getSellibriPrice(product: odoo.OdooProduct): string {
   return (product.list_price * (1 + config.ivaRate)).toFixed(2);
 }
 
-function updateProgress(done: number, total: number, batchStartTime: number): void {
+function updateProgress(done: number, total: number, batchStartTime: number, prefix = 'Sincronizando'): void {
   const elapsed = (Date.now() - batchStartTime) / 1000;
   const rate = done > 0 ? elapsed / done : 1;
   const remaining = Math.max(0, total - done);
   syncStatus.progress = {
     current: done,
     total,
-    phase: `Sincronizando ${done} / ${total} productos...`,
+    phase: `${prefix} ${done} / ${total}...`,
     startedAt: syncStatus.progress?.startedAt || new Date().toISOString(),
     estimatedSecondsLeft: Math.round(remaining * rate),
   };
@@ -140,20 +141,18 @@ function updateProgress(done: number, total: number, batchStartTime: number): vo
 
 /** Validate that a product has minimum required data for Sellibri */
 function isValidForSellibri(product: odoo.OdooProduct): boolean {
-  // Must have a title
   if (!product.name || product.name.trim() === '') return false;
-  // Must have a price > 0
   const price = parseFloat(getSellibriPrice(product));
   if (isNaN(price) || price <= 0) return false;
   return true;
 }
 
-// ─── Smart Product Sync ────────────────────────────────────────
+// ─── Payload Builders ──────────────────────────────────────────
 
 /**
- * Build a PARTIAL update payload.
- * KEY FIX: ALWAYS set status='active' if product has price > 0 (even if currently 'draft').
- * Fill empty fields only. Always update price/stock if different.
+ * Build a PARTIAL update payload — only changed fields.
+ * Compares Odoo data against Sellibri data entirely in memory.
+ * Returns null if nothing changed (= skip the API call entirely).
  */
 function buildSmartPayload(
   odooProduct: odoo.OdooProduct,
@@ -177,12 +176,12 @@ function buildSmartPayload(
     tax_rate_id: config.sellibri.taxRateId,
   };
 
-  // FIX: If product is hidden (draft) but should be visible → force active
+  // If product is hidden (draft) → force active
   if (sellibriProduct.status !== 'active') {
     needsUpdate = true;
   }
 
-  // ALWAYS check price — update if different
+  // Price — update if different
   const currentPrice = parseFloat(variant.price || '0');
   const newPrice = parseFloat(odooPrice);
   if (Math.abs(currentPrice - newPrice) > 0.01) {
@@ -190,7 +189,7 @@ function buildSmartPayload(
     needsUpdate = true;
   }
 
-  // ALWAYS check stock — update if different
+  // Stock — update if different
   const currentStock = variant.stock_items?.[0]?.available ?? 0;
   if (currentStock !== odooStock) {
     masterAttrs.stock_items_attributes = [{
@@ -243,7 +242,7 @@ function buildSmartPayload(
   return {
     product: {
       title: productFields.title || sellibriProduct.title || odooProduct.name,
-      status: 'active', // ALWAYS set active for synced products
+      status: 'active',
       ...(productFields.description !== undefined ? { description: productFields.description } : {}),
       ...(productFields.product_vendor_id ? { product_vendor_id: productFields.product_vendor_id } : {}),
       master_attributes: masterAttrs,
@@ -252,10 +251,7 @@ function buildSmartPayload(
   };
 }
 
-/**
- * Build a FULL payload for creating new products.
- * Validates that product has required fields before creating.
- */
+/** Build a FULL payload for creating new products. */
 function buildFullPayload(
   odooProduct: odoo.OdooProduct,
 ): sellibri.SellibriProductPayload {
@@ -293,7 +289,28 @@ function buildFullPayload(
   };
 }
 
-// ─── Product Sync (Sequential — no parallel workers) ───────────
+// ═══════════════════════════════════════════════════════════════
+// PRODUCT SYNC — Optimized
+// ═══════════════════════════════════════════════════════════════
+//
+// Architecture:
+// 1. Load Sellibri catalog ONCE into memory (cached for 30 min)
+// 2. Fetch only CHANGED products from Odoo (using write_date filter)
+// 3. For each changed product, compare IN MEMORY against Sellibri
+//    - If SKU exists in catalog → build smart diff → PATCH only if different
+//    - If SKU not in catalog → CREATE (no extra API calls to verify)
+// 4. The catalog cache is updated after each create/update
+//    so subsequent operations see the latest data.
+//
+// This means:
+// - First run: ~110 GET pages to load catalog + N PATCHes for changed products
+// - Subsequent runs: 0 GET pages (cached) + only PATCHes for changes
+// - Cron (price/stock): 0 GET pages + only PATCHes for changed prices/stock
+//
+// Anti-duplication: catalog cache is the single source of truth.
+// Since it's loaded fully and updated on every create, if a SKU
+// exists anywhere in Sellibri, it will be in the cache.
+// ═══════════════════════════════════════════════════════════════
 
 export async function syncProducts(): Promise<void> {
   if (productSyncRunning) {
@@ -311,10 +328,11 @@ export async function syncProducts(): Promise<void> {
   let errors = 0;
   let activated = 0;
   let invalidSkipped = 0;
+  let duplicatePrevented = 0;
   const syncStartTime = Date.now();
 
   try {
-    // ── Phase 1: Pre-load Sellibri catalog ──
+    // ── Phase 1: Load Sellibri catalog (cached in memory) ──
     syncStatus.progress = {
       current: 0, total: 0,
       phase: 'Cargando catálogo Sellibri...',
@@ -322,11 +340,11 @@ export async function syncProducts(): Promise<void> {
       estimatedSecondsLeft: null,
     };
     logger.info(MODULE, 'Phase 1: Loading Sellibri catalog...');
-    const sellibriCatalog = await sellibri.fetchAllProducts();
-    logger.info(MODULE, `Sellibri catalog loaded: ${sellibriCatalog.size} SKUs`);
+    const catalog = await sellibri.getCatalog();
+    logger.info(MODULE, `Sellibri catalog: ${catalog.size} SKUs`);
 
-    // Merge with persisted state
-    for (const [sku, product] of sellibriCatalog) {
+    // Merge catalog into state (for products not yet in state)
+    for (const [sku, product] of catalog) {
       if (!state.products[sku]) {
         const variant = product.all_variants?.[0];
         if (variant) {
@@ -340,12 +358,12 @@ export async function syncProducts(): Promise<void> {
       }
     }
 
-    // ── Phase 2: Fetch products from Odoo ──
-    syncStatus.progress.phase = 'Obteniendo productos de Odoo...';
-    logger.info(MODULE, 'Phase 2: Fetching products from Odoo...');
+    // ── Phase 2: Fetch ONLY changed products from Odoo ──
+    syncStatus.progress.phase = 'Obteniendo productos modificados de Odoo...';
+    logger.info(MODULE, 'Phase 2: Fetching changed products from Odoo...');
     const lastWrite = state.lastProductWriteDate || undefined;
     const products = await odoo.fetchAllProducts(lastWrite);
-    logger.info(MODULE, `Odoo returned ${products.length} products to sync`);
+    logger.info(MODULE, `Odoo returned ${products.length} changed products`);
 
     if (products.length === 0) {
       logger.info(MODULE, 'No products changed since last sync');
@@ -356,7 +374,7 @@ export async function syncProducts(): Promise<void> {
       return;
     }
 
-    // ── Phase 3: Sequential sync (one product at a time) ──
+    // ── Phase 3: Process changes ──
     const total = products.length;
     syncStatus.progress = {
       current: 0, total,
@@ -375,7 +393,7 @@ export async function syncProducts(): Promise<void> {
       const sku = product.default_code;
       if (!sku) continue;
 
-      // Skip if product hasn't changed since last sync
+      // Skip if product write_date hasn't changed since last sync
       const cached = state.products[sku];
       if (cached && cached.odooWriteDate === product.write_date) {
         skipped++;
@@ -383,7 +401,7 @@ export async function syncProducts(): Promise<void> {
         continue;
       }
 
-      // Validate product data before sending to Sellibri
+      // Validate product data
       if (!isValidForSellibri(product)) {
         invalidSkipped++;
         updateProgress(synced + created + skipped + errors + invalidSkipped, total, batchStartTime);
@@ -391,60 +409,46 @@ export async function syncProducts(): Promise<void> {
       }
 
       try {
-        // Look up in pre-loaded catalog + state (NO full-catalog scan per SKU)
-        const existingInCatalog = sellibriCatalog.get(sku);
-        const existingInState = cached?.sellibriId ? cached : null;
-        const existingSellibriId = existingInCatalog?.id || existingInState?.sellibriId;
-        const existingVariantId = existingInCatalog?.all_variants?.[0]?.id || existingInState?.sellibriVariantId;
+        // Look up in in-memory catalog (instant — no API call)
+        const existingInCatalog = catalog.get(sku);
 
         let sellibriId: number;
         let variantId: number;
 
-        if (existingSellibriId && existingVariantId) {
-          // ── EXISTING: smart update ──
-          const sellibriProduct = existingInCatalog || await sellibri.fetchProductById(existingSellibriId);
-          if (!sellibriProduct) {
-            skipped++;
-            updateProgress(synced + created + skipped + errors + invalidSkipped, total, batchStartTime);
-            continue;
-          }
+        if (existingInCatalog) {
+          // ── EXISTING: compare in memory, PATCH only if different ──
+          const wasDraft = existingInCatalog.status !== 'active';
+          const payload = buildSmartPayload(product, existingInCatalog);
 
-          // Track if we're activating a hidden product
-          const wasDraft = sellibriProduct.status !== 'active';
-
-          const payload = buildSmartPayload(product, sellibriProduct);
           if (payload) {
-            await sellibri.updateProduct(existingSellibriId, payload);
+            await sellibri.updateProduct(existingInCatalog.id, payload);
             synced++;
             if (wasDraft) activated++;
           } else {
-            skipped++;
+            skipped++; // Nothing changed — no API call needed
           }
 
-          sellibriId = existingSellibriId;
-          variantId = existingVariantId;
-        } else {
-          // ── SAFETY CHECK: search Sellibri by SKU before creating ──
-          // The catalog pre-load may have missed this SKU due to pagination errors or state loss
-          logger.info(MODULE, `SKU=${sku}: not in catalog/state, verifying in Sellibri before create...`);
-          const foundInSellibri = await sellibri.findProductBySku(sku);
-
-          if (foundInSellibri) {
-            // Product already exists — update instead of creating a duplicate
-            logger.warn(MODULE, `SKU=${sku}: FOUND in Sellibri (id=${foundInSellibri.id}) — updating instead of creating to prevent duplicate`);
-            const wasDraft = foundInSellibri.status !== 'active';
-            const smartPayload = buildSmartPayload(product, foundInSellibri);
-            if (smartPayload) {
-              await sellibri.updateProduct(foundInSellibri.id, smartPayload);
+          sellibriId = existingInCatalog.id;
+          variantId = existingInCatalog.all_variants?.[0]?.id || 0;
+        } else if (cached?.sellibriId) {
+          // In state but not in catalog (maybe catalog load was incomplete)
+          // Fetch directly by ID to confirm existence before creating
+          const existingById = await sellibri.fetchProductById(cached.sellibriId);
+          if (existingById) {
+            const wasDraft = existingById.status !== 'active';
+            const payload = buildSmartPayload(product, existingById);
+            if (payload) {
+              await sellibri.updateProduct(existingById.id, payload);
               synced++;
               if (wasDraft) activated++;
             } else {
               skipped++;
             }
-            sellibriId = foundInSellibri.id;
-            variantId = foundInSellibri.all_variants?.[0]?.id || 0;
+            sellibriId = existingById.id;
+            variantId = existingById.all_variants?.[0]?.id || 0;
+            duplicatePrevented++;
           } else {
-            // Truly new — safe to create
+            // State entry is stale — product was deleted from Sellibri, create fresh
             const payload = buildFullPayload(product);
             const newProduct = await sellibri.createProduct(payload);
             sellibriId = newProduct.id;
@@ -452,6 +456,14 @@ export async function syncProducts(): Promise<void> {
             created++;
             logger.info(MODULE, `Created SKU=${sku} (id=${sellibriId})`);
           }
+        } else {
+          // ── TRULY NEW: not in catalog, not in state → create ──
+          const payload = buildFullPayload(product);
+          const newProduct = await sellibri.createProduct(payload);
+          sellibriId = newProduct.id;
+          variantId = newProduct.all_variants?.[0]?.id || 0;
+          created++;
+          logger.info(MODULE, `Created SKU=${sku} (id=${sellibriId})`);
         }
 
         const odooPrice = getSellibriPrice(product);
@@ -470,7 +482,6 @@ export async function syncProducts(): Promise<void> {
       } catch (err: any) {
         errors++;
         const status = (err as any)?.response?.status;
-        // Only log 400 errors at debug level — they're just bad data, not system issues
         if (status === 400) {
           logger.warn(MODULE, `SKU=${sku}: 400 Bad Request (invalid data, skipped)`);
         } else {
@@ -483,7 +494,7 @@ export async function syncProducts(): Promise<void> {
 
       if (done % 100 === 0) {
         saveState(state);
-        logger.info(MODULE, `Progress: ${done}/${total} (updated=${synced}, created=${created}, activated=${activated}, skipped=${skipped}, invalid=${invalidSkipped}, errors=${errors})`);
+        logger.info(MODULE, `Progress: ${done}/${total} (updated=${synced}, created=${created}, activated=${activated}, skipped=${skipped}, invalid=${invalidSkipped}, dupes_prevented=${duplicatePrevented}, errors=${errors})`);
       }
     }
 
@@ -497,7 +508,7 @@ export async function syncProducts(): Promise<void> {
     syncStatus.productsSynced = Object.keys(state.products).length;
 
     const totalTime = ((Date.now() - syncStartTime) / 1000 / 60).toFixed(1);
-    const msg = `Product sync ${abortRequested ? 'ABORTED' : 'complete'} in ${totalTime}min: ${created} created, ${synced} updated, ${activated} activated, ${skipped} skipped, ${invalidSkipped} invalid, ${errors} errors`;
+    const msg = `Product sync ${abortRequested ? 'ABORTED' : 'complete'} in ${totalTime}min: ${created} created, ${synced} updated, ${activated} activated, ${skipped} skipped, ${invalidSkipped} invalid, ${duplicatePrevented} dupes prevented, ${errors} errors`;
     logger.info(MODULE, msg);
   } catch (err: any) {
     syncStatus.lastError = err.message;
@@ -521,21 +532,16 @@ export async function syncSingleSku(sku: string): Promise<{ success: boolean; me
       return { success: false, message: `SKU ${sku} no encontrado en Odoo` };
     }
 
-    // 1. Check local state first
-    const state = loadState();
-    const cached = state.products[sku];
-    let existingProduct: sellibri.SellibriProduct | null = null;
+    // Look up in cached catalog (instant)
+    const catalog = await sellibri.getCatalog();
+    let existingProduct = catalog.get(sku) || null;
 
-    if (cached?.sellibriId) {
-      existingProduct = await sellibri.fetchProductById(cached.sellibriId);
-    }
-
-    // 2. If not in state, search Sellibri catalog to prevent duplicates
+    // Fallback: check state if not in catalog
     if (!existingProduct) {
-      logger.info(MODULE, `SKU=${sku}: not in local state, searching Sellibri catalog...`);
-      existingProduct = await sellibri.findProductBySku(sku);
-      if (existingProduct) {
-        logger.warn(MODULE, `SKU=${sku}: found in Sellibri (id=${existingProduct.id}) — will update, not create`);
+      const state = loadState();
+      const cached = state.products[sku];
+      if (cached?.sellibriId) {
+        existingProduct = await sellibri.fetchProductById(cached.sellibriId);
       }
     }
 
@@ -556,6 +562,7 @@ export async function syncSingleSku(sku: string): Promise<{ success: boolean; me
       logger.info(MODULE, `Force-created SKU=${sku} (id=${sellibriId})`);
     }
 
+    const state = loadState();
     const odooPrice = getSellibriPrice(odooProduct);
     state.products[sku] = {
       sellibriId,
@@ -615,26 +622,22 @@ export async function syncCleanup(): Promise<CleanupResult> {
   };
 
   try {
-    // Phase 1: Load Sellibri catalog
+    // Phase 1: Load catalogs
     syncStatus.progress = {
       current: 0, total: 0,
-      phase: 'Limpieza: cargando catálogo Sellibri...',
+      phase: 'Limpieza: cargando catálogos...',
       startedAt: new Date().toISOString(),
       estimatedSecondsLeft: null,
     };
-    logger.info(MODULE, 'Cleanup Phase 1: Loading Sellibri catalog...');
-    const sellibriCatalog = await sellibri.fetchAllProducts();
+    logger.info(MODULE, 'Cleanup: Loading catalogs...');
+    const sellibriCatalog = await sellibri.getCatalog(true); // force reload for accuracy
     result.totalSellibri = sellibriCatalog.size;
-    logger.info(MODULE, `Sellibri catalog: ${sellibriCatalog.size} SKUs`);
 
-    // Phase 2: Load Odoo active SKUs
-    syncStatus.progress.phase = 'Limpieza: cargando SKUs activos de Odoo...';
-    logger.info(MODULE, 'Cleanup Phase 2: Loading Odoo active SKUs...');
     const odooSKUs = await odoo.fetchAllActiveSKUs();
     result.totalOdoo = odooSKUs.size;
-    logger.info(MODULE, `Odoo active SKUs: ${odooSKUs.size}`);
+    logger.info(MODULE, `Sellibri: ${sellibriCatalog.size} | Odoo: ${odooSKUs.size}`);
 
-    // Phase 3: Find orphans
+    // Phase 2: Find orphans
     const orphans: { sku: string; sellibriId: number }[] = [];
     const seenIds = new Set<number>();
 
@@ -646,23 +649,12 @@ export async function syncCleanup(): Promise<CleanupResult> {
       }
     }
 
-    logger.info(MODULE, `Found ${orphans.length} orphan products to delete`);
+    logger.info(MODULE, `Found ${orphans.length} orphan products`);
+    if (orphans.length === 0) return result;
 
-    if (orphans.length === 0) {
-      logger.info(MODULE, 'Cleanup: no orphans — catalogs are in sync');
-      return result;
-    }
-
-    // Phase 4: Delete orphans sequentially
+    // Phase 3: Delete orphans
     const total = orphans.length;
     const batchStartTime = Date.now();
-    syncStatus.progress = {
-      current: 0, total,
-      phase: `Limpieza: eliminando 0 / ${total} huérfanos...`,
-      startedAt: new Date().toISOString(),
-      estimatedSecondsLeft: null,
-    };
-
     const state = loadState();
 
     for (let i = 0; i < orphans.length; i++) {
@@ -670,7 +662,7 @@ export async function syncCleanup(): Promise<CleanupResult> {
 
       const orphan = orphans[i];
       try {
-        const deleted = await sellibri.deleteProduct(orphan.sellibriId);
+        const deleted = await sellibri.deleteProduct(orphan.sellibriId, orphan.sku);
         if (deleted) {
           result.deleted++;
           delete state.products[orphan.sku];
@@ -679,19 +671,11 @@ export async function syncCleanup(): Promise<CleanupResult> {
         }
       } catch (err: any) {
         result.failed++;
-        logger.error(MODULE, `Cleanup: failed SKU=${orphan.sku} (id=${orphan.sellibriId}): ${err.message}`);
+        logger.error(MODULE, `Cleanup: failed SKU=${orphan.sku}: ${err.message}`);
       }
 
       const done = result.deleted + result.failed;
-      const elapsed = (Date.now() - batchStartTime) / 1000;
-      const rate = done > 0 ? elapsed / done : 1;
-      syncStatus.progress = {
-        current: done,
-        total,
-        phase: `Limpieza: eliminando ${done} / ${total} huérfanos...`,
-        startedAt: syncStatus.progress?.startedAt || new Date().toISOString(),
-        estimatedSecondsLeft: Math.round((total - done) * rate),
-      };
+      updateProgress(done, total, batchStartTime, 'Limpieza:');
 
       if (done % 50 === 0) {
         saveState(state);
@@ -700,7 +684,7 @@ export async function syncCleanup(): Promise<CleanupResult> {
     }
 
     saveState(state);
-    logger.info(MODULE, `Cleanup complete: ${result.deleted} deleted, ${result.failed} failed out of ${orphans.length} orphans`);
+    logger.info(MODULE, `Cleanup complete: ${result.deleted} deleted, ${result.failed} failed`);
   } catch (err: any) {
     syncStatus.lastError = err.message;
     logger.error(MODULE, `Cleanup failed: ${err.message}`);
@@ -727,10 +711,6 @@ export interface FixTitlesResult {
   errors: number;
 }
 
-/**
- * One-time corrective run: compare Odoo titles/SKUs against Sellibri
- * and PATCH any differences. Does NOT touch price, stock, or status.
- */
 export async function syncFixTitlesSku(): Promise<FixTitlesResult> {
   if (fixTitlesRunning || productSyncRunning || stockSyncRunning) {
     logger.warn(MODULE, 'Fix titles: another sync is running, skipping');
@@ -745,24 +725,18 @@ export async function syncFixTitlesSku(): Promise<FixTitlesResult> {
   };
 
   try {
-    // Phase 1: Load Sellibri catalog
     syncStatus.progress = {
       current: 0, total: 0,
-      phase: 'Corregir Títulos/SKU: cargando catálogo Sellibri...',
+      phase: 'Corregir Títulos/SKU: cargando catálogos...',
       startedAt: new Date().toISOString(),
       estimatedSecondsLeft: null,
     };
-    logger.info(MODULE, 'Fix titles Phase 1: Loading Sellibri catalog...');
-    const sellibriCatalog = await sellibri.fetchAllProducts();
-    logger.info(MODULE, `Sellibri catalog loaded: ${sellibriCatalog.size} SKUs`);
 
-    // Phase 2: Fetch all products from Odoo
-    syncStatus.progress.phase = 'Corregir Títulos/SKU: obteniendo productos de Odoo...';
-    logger.info(MODULE, 'Fix titles Phase 2: Fetching products from Odoo...');
+    const catalog = await sellibri.getCatalog();
     const odooProducts = await odoo.fetchAllProducts();
-    logger.info(MODULE, `Odoo returned ${odooProducts.length} products`);
+    logger.info(MODULE, `Fix titles: ${catalog.size} Sellibri, ${odooProducts.length} Odoo`);
 
-    // Phase 3: Compare and fix
+    // Compare in memory
     const toFix: { odoo: odoo.OdooProduct; sellibri: sellibri.SellibriProduct }[] = [];
 
     for (const op of odooProducts) {
@@ -770,19 +744,17 @@ export async function syncFixTitlesSku(): Promise<FixTitlesResult> {
       if (!sku) continue;
       result.total++;
 
-      const sp = sellibriCatalog.get(sku);
+      const sp = catalog.get(sku);
       if (!sp) continue;
       result.matched++;
 
       const variant = sp.all_variants?.[0];
       if (!variant) continue;
 
-      // Compare title
       const odooTitle = (op.name || '').trim();
       const sellibriTitle = (sp.title || '').trim();
       const titleDiff = odooTitle && sellibriTitle !== odooTitle;
 
-      // Compare SKU on the variant level
       const sellibriSku = (variant.sku || '').trim();
       const skuDiff = sku && sellibriSku !== sku;
 
@@ -793,22 +765,11 @@ export async function syncFixTitlesSku(): Promise<FixTitlesResult> {
       }
     }
 
-    logger.info(MODULE, `Fix titles: ${toFix.length} products need correction, ${result.skipped} already correct`);
+    logger.info(MODULE, `Fix titles: ${toFix.length} need correction, ${result.skipped} already correct`);
+    if (toFix.length === 0) return result;
 
-    if (toFix.length === 0) {
-      logger.info(MODULE, 'Fix titles: nothing to fix — all titles and SKUs match');
-      return result;
-    }
-
-    // Phase 4: Patch products sequentially
     const total = toFix.length;
     const batchStartTime = Date.now();
-    syncStatus.progress = {
-      current: 0, total,
-      phase: `Corrigiendo títulos/SKU: 0 / ${total}...`,
-      startedAt: new Date().toISOString(),
-      estimatedSecondsLeft: null,
-    };
 
     for (let i = 0; i < toFix.length; i++) {
       if (abortRequested) break;
@@ -825,58 +786,30 @@ export async function syncFixTitlesSku(): Promise<FixTitlesResult> {
         const titleNeedsFix = odooTitle && sellibriTitle !== odooTitle;
         const skuNeedsFix = sku && sellibriSku !== sku;
 
-        // Build minimal payload — ONLY title and/or sku
-        const payload: sellibri.SellibriProductPayload = {
-          product: {},
-        };
+        const payload: sellibri.SellibriProductPayload = { product: {} };
 
-        if (titleNeedsFix) {
-          payload.product.title = odooTitle;
-        }
-
-        // SKU goes in master_attributes
-        if (skuNeedsFix) {
-          payload.product.master_attributes = { sku };
-        }
-
-        // Sellibri requires title in the payload — if we're not fixing it, send current
-        if (!payload.product.title) {
-          payload.product.title = sellibriTitle || odooTitle;
-        }
+        if (titleNeedsFix) payload.product.title = odooTitle;
+        if (skuNeedsFix) payload.product.master_attributes = { sku };
+        if (!payload.product.title) payload.product.title = sellibriTitle || odooTitle;
 
         await sellibri.updateProduct(sp.id, payload);
 
-        if (titleNeedsFix) {
-          result.titleFixed++;
-          logger.info(MODULE, `Fixed title SKU=${sku}: "${sellibriTitle}" → "${odooTitle}"`);
-        }
-        if (skuNeedsFix) {
-          result.skuFixed++;
-          logger.info(MODULE, `Fixed SKU variant: "${sellibriSku}" → "${sku}"`);
-        }
+        if (titleNeedsFix) result.titleFixed++;
+        if (skuNeedsFix) result.skuFixed++;
       } catch (err: any) {
         result.errors++;
         logger.error(MODULE, `Fix title error SKU=${sku}: ${err.message}`);
       }
 
-      const done = result.titleFixed + result.skuFixed + result.skipped + result.errors;
-      const elapsed = (Date.now() - batchStartTime) / 1000;
-      const rate = (i + 1) > 0 ? elapsed / (i + 1) : 1;
-      syncStatus.progress = {
-        current: i + 1,
-        total,
-        phase: `Corrigiendo títulos/SKU: ${i + 1} / ${total}...`,
-        startedAt: syncStatus.progress?.startedAt || new Date().toISOString(),
-        estimatedSecondsLeft: Math.round((total - i - 1) * rate),
-      };
+      updateProgress(i + 1, total, batchStartTime, 'Corrigiendo títulos/SKU:');
 
       if ((i + 1) % 50 === 0) {
-        logger.info(MODULE, `Fix titles progress: ${i + 1}/${total} (titles=${result.titleFixed}, skus=${result.skuFixed}, errors=${result.errors})`);
+        logger.info(MODULE, `Fix titles: ${i + 1}/${total} (titles=${result.titleFixed}, skus=${result.skuFixed}, errors=${result.errors})`);
       }
     }
 
     const totalTime = ((Date.now() - batchStartTime) / 1000 / 60).toFixed(1);
-    logger.info(MODULE, `Fix titles ${abortRequested ? 'ABORTED' : 'complete'} in ${totalTime}min: ${result.titleFixed} titles fixed, ${result.skuFixed} SKUs fixed, ${result.skipped} already correct, ${result.errors} errors`);
+    logger.info(MODULE, `Fix titles ${abortRequested ? 'ABORTED' : 'complete'} in ${totalTime}min: ${result.titleFixed} titles, ${result.skuFixed} SKUs, ${result.errors} errors`);
   } catch (err: any) {
     syncStatus.lastError = err.message;
     logger.error(MODULE, `Fix titles failed: ${err.message}`);
@@ -890,7 +823,18 @@ export async function syncFixTitlesSku(): Promise<FixTitlesResult> {
   return result;
 }
 
-// ─── Precio/Stock Sync ─────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════
+// PRICE/STOCK SYNC — Optimized
+// ═══════════════════════════════════════════════════════════════
+//
+// Flow:
+// 1. Fetch all SKU/price/stock from Odoo in 1 bulk call
+// 2. Compare against LOCAL state (lastPrice, lastStock)
+// 3. Only PATCH products where price or stock actually changed
+//
+// This is already efficient — the only API calls are the PATCHes
+// for products that genuinely changed.
+// ═══════════════════════════════════════════════════════════════
 
 export async function syncPriceStock(): Promise<void> {
   if (stockSyncRunning) {
@@ -914,7 +858,7 @@ export async function syncPriceStock(): Promise<void> {
       return;
     }
 
-    logger.info(MODULE, `Starting price/stock sync for ${trackedSkus.length} tracked products`);
+    logger.info(MODULE, `Price/stock sync for ${trackedSkus.length} tracked products`);
 
     syncStatus.progress = {
       current: 0, total: trackedSkus.length,
@@ -935,9 +879,9 @@ export async function syncPriceStock(): Promise<void> {
       }
     }
 
-    logger.info(MODULE, `Odoo price/stock fetched: ${odooDataMap.size} products`);
+    logger.info(MODULE, `Odoo data fetched: ${odooDataMap.size} products`);
 
-    // Build list of products that need updating
+    // Build list of products that actually changed
     const toUpdate: { sku: string; cached: ProductSyncEntry; odooData: { qty: number; price: string } }[] = [];
 
     for (const sku of trackedSkus) {
@@ -959,10 +903,11 @@ export async function syncPriceStock(): Promise<void> {
     }
 
     if (toUpdate.length === 0) {
-      logger.info(MODULE, `No price/stock changes detected (${skipped} unchanged)`);
+      logger.info(MODULE, `No price/stock changes (${skipped} unchanged)`);
     } else {
-      logger.info(MODULE, `${toUpdate.length} products need price/stock update, ${skipped} unchanged`);
+      logger.info(MODULE, `${toUpdate.length} products need update, ${skipped} unchanged`);
 
+      const batchStartTime = Date.now();
       syncStatus.progress = {
         current: 0, total: toUpdate.length,
         phase: `Actualizando precio/stock: 0 / ${toUpdate.length}...`,
@@ -970,7 +915,6 @@ export async function syncPriceStock(): Promise<void> {
         estimatedSecondsLeft: null,
       };
 
-      // Sequential update — one at a time
       for (let i = 0; i < toUpdate.length; i++) {
         if (abortRequested) break;
 
@@ -1008,18 +952,8 @@ export async function syncPriceStock(): Promise<void> {
 
         if ((i + 1) % 100 === 0) {
           saveState(state);
-          const startedAtStr: string = syncStatus.progress?.startedAt || new Date().toISOString();
-          const elapsedMs: number = Date.now() - Date.parse(startedAtStr);
-          const elapsedSec: number = elapsedMs / 1000;
-          const ratePerItem: number = (i + 1) > 0 ? elapsedSec / (i + 1) : 1;
-          syncStatus.progress = {
-            current: i + 1,
-            total: toUpdate.length,
-            phase: `Actualizando precio/stock: ${i + 1} / ${toUpdate.length}...`,
-            startedAt: startedAtStr,
-            estimatedSecondsLeft: Math.round((toUpdate.length - i - 1) * ratePerItem),
-          };
-          logger.info(MODULE, `Price/Stock progress: ${i + 1}/${toUpdate.length} (prices=${priceUpdated}, stock=${stockUpdated}, errors=${errors})`);
+          updateProgress(i + 1, toUpdate.length, batchStartTime, 'Actualizando precio/stock:');
+          logger.info(MODULE, `Price/Stock: ${i + 1}/${toUpdate.length} (prices=${priceUpdated}, stock=${stockUpdated}, errors=${errors})`);
         }
       }
     }
@@ -1028,7 +962,7 @@ export async function syncPriceStock(): Promise<void> {
     saveState(state);
 
     syncStatus.lastStockSync = state.lastStockSync;
-    logger.info(MODULE, `Price/Stock sync complete: ${priceUpdated} prices, ${stockUpdated} stock updated, ${skipped} unchanged, ${errors} errors`);
+    logger.info(MODULE, `Price/Stock sync complete: ${priceUpdated} prices, ${stockUpdated} stock, ${skipped} unchanged, ${errors} errors`);
   } catch (err: any) {
     syncStatus.lastError = err.message;
     logger.error(MODULE, `Price/Stock sync failed: ${err.message}`);

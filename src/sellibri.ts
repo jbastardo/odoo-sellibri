@@ -5,23 +5,22 @@ import { logger } from './logger';
 const MODULE = 'sellibri';
 
 // ─── Adaptive Rate Limiter ─────────────────────────────────────
-// Conservative: 2 req/sec steady, global cooldown on 429
+// Aggressive: 3 req/sec steady, global cooldown on 429
 
 class AdaptiveRateLimiter {
   private lastRequestTime = 0;
-  private minInterval = 600; // 600ms between requests = ~1.6 req/sec (safe under 4/sec limit)
-  private cooldownUntil = 0; // Global cooldown timestamp — all requests wait
+  private minInterval = 350; // 350ms = ~2.8 req/sec (under 4/sec limit with margin)
+  private cooldownUntil = 0;
+  private consecutiveSuccesses = 0;
 
   async waitForSlot(): Promise<void> {
-    // Wait for global cooldown (set when ANY request gets a 429)
     const now = Date.now();
     if (this.cooldownUntil > now) {
       const waitMs = this.cooldownUntil - now;
-      logger.warn(MODULE, `Global cooldown active, waiting ${Math.round(waitMs / 1000)}s`);
+      logger.warn(MODULE, `Cooldown active, waiting ${Math.round(waitMs / 1000)}s`);
       await this.delay(waitMs);
     }
 
-    // Ensure minimum interval between requests
     const elapsed = Date.now() - this.lastRequestTime;
     if (elapsed < this.minInterval) {
       await this.delay(this.minInterval - elapsed);
@@ -30,13 +29,21 @@ class AdaptiveRateLimiter {
     this.lastRequestTime = Date.now();
   }
 
-  /** Called when we get a 429 — blocks ALL subsequent requests for the given duration */
+  reportSuccess(): void {
+    this.consecutiveSuccesses++;
+    // Speed up after 50 consecutive successes (reduce to 300ms)
+    if (this.consecutiveSuccesses > 50 && this.minInterval > 300) {
+      this.minInterval = 300;
+    }
+  }
+
   triggerCooldown(durationMs: number): void {
+    this.consecutiveSuccesses = 0;
+    this.minInterval = 500; // Slow down after a 429
     const newCooldown = Date.now() + durationMs;
-    // Only extend cooldown, never shorten it
     if (newCooldown > this.cooldownUntil) {
       this.cooldownUntil = newCooldown;
-      logger.warn(MODULE, `429 received — global cooldown for ${Math.round(durationMs / 1000)}s`);
+      logger.warn(MODULE, `429 — cooldown ${Math.round(durationMs / 1000)}s`);
     }
   }
 
@@ -53,21 +60,22 @@ const client: AxiosInstance = axios.create({
     'X-Api-Key': config.sellibri.apiKey,
     'Content-Type': 'application/json',
   },
-  timeout: 60_000,
+  timeout: 30_000,
   maxBodyLength: Infinity,
   maxContentLength: Infinity,
 });
 
 /** Retry wrapper with adaptive backoff on 429 */
-async function withRetry<T>(fn: () => Promise<T>, maxRetries = 4): Promise<T> {
+async function withRetry<T>(fn: () => Promise<T>, maxRetries = 3): Promise<T> {
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     try {
-      return await fn();
+      const result = await fn();
+      rateLimiter.reportSuccess();
+      return result;
     } catch (err: any) {
       const status = (err as AxiosError)?.response?.status;
       if (status === 429 && attempt < maxRetries) {
-        // Exponential: 45s, 90s, 180s, 360s
-        const waitMs = Math.pow(2, attempt) * 45_000;
+        const waitMs = Math.pow(2, attempt) * 30_000; // 30s, 60s, 120s
         rateLimiter.triggerCooldown(waitMs);
         await new Promise(resolve => setTimeout(resolve, waitMs));
         continue;
@@ -160,11 +168,48 @@ export interface SellibriProduct {
   taxon_ids?: number[];
 }
 
-// ─── Catalog Loading ───────────────────────────────────────────
+// ─── In-Memory Catalog Cache ───────────────────────────────────
+// Loaded once at startup / first sync, then kept in memory.
+// Updated incrementally when products are created/updated.
+// Eliminates the need to re-fetch 110 pages for every operation.
 
-/** Fetch ALL products from Sellibri with pagination. Builds SKU→product map.
- *  Resilient: skips individual page errors, stops after 5 consecutive failures. */
-export async function fetchAllProducts(): Promise<Map<string, SellibriProduct>> {
+let catalogCache: Map<string, SellibriProduct> | null = null;
+let catalogLoadedAt: number = 0;
+const CATALOG_MAX_AGE_MS = 30 * 60 * 1000; // 30 minutes
+
+/** Get the in-memory catalog. Loads from API if not cached or expired. */
+export async function getCatalog(forceReload = false): Promise<Map<string, SellibriProduct>> {
+  const age = Date.now() - catalogLoadedAt;
+  if (!catalogCache || forceReload || age > CATALOG_MAX_AGE_MS) {
+    catalogCache = await fetchAllProductsFromApi();
+    catalogLoadedAt = Date.now();
+  }
+  return catalogCache;
+}
+
+/** Invalidate the cache (e.g. after reset) */
+export function invalidateCatalog(): void {
+  catalogCache = null;
+  catalogLoadedAt = 0;
+}
+
+/** Update the in-memory catalog entry for a SKU (after create/update) */
+function updateCatalogEntry(sku: string, product: SellibriProduct): void {
+  if (catalogCache) {
+    catalogCache.set(sku, product);
+  }
+}
+
+/** Remove a SKU from the in-memory catalog (after delete) */
+function removeCatalogEntry(sku: string): void {
+  if (catalogCache) {
+    catalogCache.delete(sku);
+  }
+}
+
+// ─── Catalog Loading (internal) ────────────────────────────────
+
+async function fetchAllProductsFromApi(): Promise<Map<string, SellibriProduct>> {
   const map = new Map<string, SellibriProduct>();
   let page = 1;
   const perPage = 50;
@@ -206,43 +251,9 @@ export async function fetchAllProducts(): Promise<Map<string, SellibriProduct>> 
   return map;
 }
 
-/** Search for a product by SKU in Sellibri by scanning all pages.
- *  Used as a safety check before creating to prevent duplicates.
- *  Returns the product if found, null otherwise. */
-export async function findProductBySku(sku: string): Promise<SellibriProduct | null> {
-  let page = 1;
-  const perPage = 50;
-  let consecutiveErrors = 0;
-
-  while (true) {
-    try {
-      const data = await apiGet('/products', { per_page: perPage, page });
-      const products: SellibriProduct[] = data.products || [];
-      if (products.length === 0) break;
-
-      consecutiveErrors = 0;
-
-      for (const p of products) {
-        for (const v of p.all_variants || []) {
-          if (v.sku === sku) {
-            logger.info(MODULE, `findProductBySku: found SKU=${sku} → id=${p.id} on page ${page}`);
-            return p;
-          }
-        }
-      }
-
-      if (products.length < perPage) break;
-    } catch (err: any) {
-      consecutiveErrors++;
-      if (consecutiveErrors >= 3) {
-        logger.warn(MODULE, `findProductBySku: giving up after ${consecutiveErrors} errors on page ${page}`);
-        break;
-      }
-    }
-    page++;
-  }
-
-  return null;
+/** Public alias — always uses the cache */
+export async function fetchAllProducts(): Promise<Map<string, SellibriProduct>> {
+  return getCatalog();
 }
 
 /** Fetch a single Sellibri product by its ID */
@@ -260,24 +271,38 @@ export async function fetchProductById(id: number): Promise<SellibriProduct | nu
 
 export async function createProduct(payload: SellibriProductPayload): Promise<SellibriProduct> {
   const data = await apiPost('/products', payload);
-  return data.product || data;
+  const product = data.product || data;
+  // Update in-memory catalog
+  const sku = payload.product?.master_attributes?.sku;
+  if (sku && product) {
+    updateCatalogEntry(sku, product);
+  }
+  return product;
 }
 
 export async function updateProduct(id: number, payload: SellibriProductPayload): Promise<SellibriProduct> {
   const data = await apiPatch(`/products/${id}`, payload);
-  return data.product || data;
+  const product = data.product || data;
+  // Update in-memory catalog
+  const sku = payload.product?.master_attributes?.sku || product?.all_variants?.[0]?.sku;
+  if (sku && product) {
+    updateCatalogEntry(sku, product);
+  }
+  return product;
 }
 
 /** Delete a product from Sellibri by its ID */
-export async function deleteProduct(id: number): Promise<boolean> {
+export async function deleteProduct(id: number, sku?: string): Promise<boolean> {
   try {
     await apiDelete(`/products/${id}`);
+    if (sku) removeCatalogEntry(sku);
     logger.info(MODULE, `Deleted product id=${id}`);
     return true;
   } catch (err: any) {
     const status = (err as AxiosError)?.response?.status;
     if (status === 404) {
-      return true; // Already gone
+      if (sku) removeCatalogEntry(sku);
+      return true;
     }
     logger.error(MODULE, `Failed to delete product id=${id}: ${err.message}`);
     return false;
@@ -295,24 +320,4 @@ export async function deactivateProduct(id: number): Promise<boolean> {
     logger.error(MODULE, `Failed to deactivate product id=${id}: ${err.message}`);
     return false;
   }
-}
-
-// ─── Sequential Batch Executor ─────────────────────────────────
-// Concurrency = 1 to avoid overloading Sellibri API
-
-export async function batchExecute<T>(
-  tasks: (() => Promise<T>)[],
-  _concurrency: number = 1, // Ignored — always sequential to prevent 429 storms
-): Promise<(T | Error)[]> {
-  const results: (T | Error)[] = new Array(tasks.length);
-
-  for (let i = 0; i < tasks.length; i++) {
-    try {
-      results[i] = await tasks[i]();
-    } catch (err: any) {
-      results[i] = err instanceof Error ? err : new Error(String(err));
-    }
-  }
-
-  return results;
 }
