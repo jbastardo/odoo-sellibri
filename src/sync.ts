@@ -629,6 +629,39 @@ export async function syncSingleSku(sku: string): Promise<{ success: boolean; me
       logger.info(MODULE, `Force-created SKU=${sku} (id=${sellibriId})`);
     }
 
+    // ── Always sync images ──────────────────────────────────────
+    let imageMsg = '';
+    try {
+      const hasOdooImage = await odoo.productHasImage(odooProduct.id);
+      if (hasOdooImage) {
+        const imageUrls = odoo.buildImageUrls(odooProduct);
+        const title = cleanTitle(odooProduct.name);
+        const imagesAttrs: sellibri.SellibriImageAttribute[] = [];
+
+        if (imageUrls.mainUrl) {
+          imagesAttrs.push({ remote_url: imageUrls.mainUrl, position: 1, alt: title });
+        }
+        for (const extra of imageUrls.additionalUrls) {
+          imagesAttrs.push({ remote_url: extra.url, position: extra.position, alt: title });
+        }
+
+        if (imagesAttrs.length > 0) {
+          await sellibri.updateProduct(sellibriId, {
+            product: {
+              master_attributes: {
+                images_attributes: imagesAttrs,
+              },
+            },
+          });
+          imageMsg = ` + ${imagesAttrs.length} imágenes`;
+          logger.info(MODULE, `SKU=${sku}: ${imagesAttrs.length} images synced`);
+        }
+      }
+    } catch (imgErr: any) {
+      logger.warn(MODULE, `SKU=${sku}: image sync failed (non-blocking): ${imgErr.message}`);
+      imageMsg = ' (imágenes fallaron)';
+    }
+
     const state = loadState();
     const odooPrice = getSellibriPrice(odooProduct);
     state.products[sku] = {
@@ -644,8 +677,8 @@ export async function syncSingleSku(sku: string): Promise<{ success: boolean; me
     return {
       success: true,
       message: existingProduct
-        ? `SKU ${sku} actualizado (existente en Sellibri)`
-        : `SKU ${sku} creado en Sellibri`,
+        ? `SKU ${sku} actualizado${imageMsg}`
+        : `SKU ${sku} creado en Sellibri${imageMsg}`,
     };
   } catch (err: any) {
     logger.error(MODULE, `Force sync SKU=${sku} failed: ${err.message}`);
