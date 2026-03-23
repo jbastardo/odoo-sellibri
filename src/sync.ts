@@ -254,7 +254,6 @@ function buildDiffPayload(
   const odooPrice = getSellibriPrice(odooProduct);
   const odooStock = Math.max(0, Math.floor(odooProduct.qty_available || 0));
   const odooTitle = cleanTitle(odooProduct.name);
-  const odooDescription = odooProduct.website_description || odooProduct.description_sale || '';
   const categId = Array.isArray(odooProduct.categ_id) ? odooProduct.categ_id[0] : 0;
   const taxonId = mapCategory(categId);
   const vendorId = mapBrandToVendor(odooProduct.brand_id);
@@ -272,23 +271,9 @@ function buildDiffPayload(
     needsUpdate = true;
   }
 
-  // Slug
-  if ((sp.slug || '') !== odooProduct.default_code) {
-    productFields.slug = odooProduct.default_code;
-    needsUpdate = true;
-  }
-
-  // Title
+  // Title (Odoo is master)
   if ((sp.title || '') !== odooTitle) {
     productFields.title = odooTitle;
-    needsUpdate = true;
-  }
-
-  // Description (Odoo is master — overwrite if different)
-  const sellibriDesc = (sp.description || '').trim();
-  const cleanOdooDesc = (typeof odooDescription === 'string' ? odooDescription : '').trim();
-  if (cleanOdooDesc && sellibriDesc !== cleanOdooDesc) {
-    productFields.description = cleanOdooDesc;
     needsUpdate = true;
   }
 
@@ -310,9 +295,9 @@ function buildDiffPayload(
     needsUpdate = true;
   }
 
-  // Category
+  // Category (only if Sellibri has none set)
   const currentTaxons = sp.taxon_ids || [];
-  if (!currentTaxons.includes(taxonId)) {
+  if (currentTaxons.length === 0) {
     productFields.taxon_ids = [taxonId];
     needsUpdate = true;
   }
@@ -324,7 +309,7 @@ function buildDiffPayload(
   }
 
   // Barcode
-  if (odooProduct.barcode && (variant.barcode || '') !== odooProduct.barcode) {
+  if (odooProduct.barcode && (variant.barcode || '') !== String(odooProduct.barcode)) {
     masterAttrs.barcode = odooProduct.barcode;
     needsUpdate = true;
   }
@@ -336,7 +321,7 @@ function buildDiffPayload(
     needsUpdate = true;
   }
 
-  // Images: check if Sellibri has no images but Odoo does
+  // Images: add if Sellibri has none
   const sellibriImages = variant.images || [];
   if (sellibriImages.length === 0) {
     const imagesAttrs = buildImagesPayload(odooProduct);
@@ -346,14 +331,17 @@ function buildDiffPayload(
     }
   }
 
+  // Note: slug and description are NOT compared in diff.
+  // - Slug: Sellibri auto-generates from title, ignores our value
+  // - Description: HTML formatting differs between Odoo and Sellibri
+  // Both are set correctly on CREATE (buildFullPayload).
+
   if (!needsUpdate) return null;
 
   return {
     product: {
       title: productFields.title || sp.title || odooTitle,
-      ...(productFields.slug ? { slug: productFields.slug } : {}),
       status: 'active',
-      ...(productFields.description !== undefined ? { description: productFields.description } : {}),
       ...(productFields.product_vendor_id ? { product_vendor_id: productFields.product_vendor_id } : {}),
       master_attributes: masterAttrs,
       taxon_ids: productFields.taxon_ids || sp.taxon_ids || [taxonId],
