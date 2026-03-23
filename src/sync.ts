@@ -616,13 +616,19 @@ export async function syncMirror(): Promise<MirrorSyncResult> {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// ACTUALIZAR SKU — Full overwrite of a single product
+// ACTUALIZAR SKU — Delete + recreate from Odoo (clean slate)
 // ═══════════════════════════════════════════════════════════════
+// Strategy: always delete existing + create fresh.
+// This avoids image duplication and stale data issues.
+// Also fetches the real title from the Odoo website (og:title)
+// to handle products created via "Duplicate" where the API
+// name field keeps the old product's name.
 
 export async function syncSingleSku(sku: string): Promise<{ success: boolean; message: string }> {
   logger.info(MODULE, `Actualizar SKU=${sku}...`);
 
   try {
+    // 1. Fetch product from Odoo
     const odooProduct = await odoo.fetchProductBySku(sku);
     if (!odooProduct) {
       return { success: false, message: `SKU ${sku} no encontrado en Odoo` };
@@ -632,60 +638,52 @@ export async function syncSingleSku(sku: string): Promise<{ success: boolean; me
       return { success: false, message: `SKU ${sku} no tiene datos válidos (precio=0 o sin nombre)` };
     }
 
-    // Look up in Sellibri
-    const catalog = await sellibri.getCatalog();
-    let existing = catalog.get(sku) || null;
-
-    // Fallback: check state
-    if (!existing) {
-      const state = loadState();
-      const cached = state.products[sku];
-      if (cached?.sellibriId) {
-        existing = await sellibri.fetchProductById(cached.sellibriId);
+    // 2. Try to get the real title from the Odoo website
+    //    (handles duplicated products where 'name' has the old product's name)
+    let title = getProductTitle(odooProduct);
+    const tmplId = Array.isArray(odooProduct.product_tmpl_id) ? odooProduct.product_tmpl_id[0] : 0;
+    if (tmplId) {
+      const webTitle = await odoo.fetchWebTitle(tmplId);
+      if (webTitle) {
+        title = webTitle;
+        logger.info(MODULE, `SKU=${sku}: using web title "${title}"`);
       }
     }
 
-    // Build full overwrite payload WITH images
-    const payload = buildFullPayload(odooProduct, true);
+    // 3. Delete existing product in Sellibri (if any)
+    const catalog = await sellibri.getCatalog();
+    let existingProduct = catalog.get(sku) || null;
 
-    let sellibriId: number;
-    let variantId: number;
-
-    if (existing) {
-      await sellibri.updateProduct(existing.id, payload);
-      sellibriId = existing.id;
-      variantId = existing.all_variants?.[0]?.id || 0;
-      logger.info(MODULE, `Updated SKU=${sku} (id=${sellibriId}) — full overwrite`);
-    } else {
-      const newProduct = await sellibri.createProduct(payload);
-      sellibriId = newProduct.id;
-      variantId = newProduct.all_variants?.[0]?.id || 0;
-      logger.info(MODULE, `Created SKU=${sku} (id=${sellibriId})`);
-    }
-
-    // Also sync images separately (in case the payload didn't include them or they need update)
-    let imageMsg = '';
-    try {
-      const hasOdooImage = await odoo.productHasImage(odooProduct.id);
-      if (hasOdooImage) {
-        const imagesAttrs = buildImagesPayload(odooProduct);
-        if (imagesAttrs.length > 0) {
-          await sellibri.updateProduct(sellibriId, {
-            product: {
-              master_attributes: {
-                images_attributes: imagesAttrs,
-              },
-            },
-          });
-          imageMsg = ` + ${imagesAttrs.length} imágenes`;
-          logger.info(MODULE, `SKU=${sku}: ${imagesAttrs.length} images synced`);
+    // Also check state for stale references
+    if (!existingProduct) {
+      const st = loadState();
+      const cached = st.products[sku];
+      if (cached?.sellibriId) {
+        try {
+          const fetched = await sellibri.fetchProductById(cached.sellibriId);
+          if (fetched) existingProduct = fetched;
+        } catch {
+          // Product doesn't exist, that's fine
         }
       }
-    } catch (imgErr: any) {
-      logger.warn(MODULE, `SKU=${sku}: image sync failed (non-blocking): ${imgErr.message}`);
-      imageMsg = ' (imágenes fallaron)';
     }
 
+    if (existingProduct) {
+      logger.info(MODULE, `SKU=${sku}: deleting existing id=${existingProduct.id}`);
+      await sellibri.deleteProduct(existingProduct.id, sku);
+    }
+
+    // 4. Create fresh product with correct title + images
+    const payload = buildFullPayload(odooProduct, true);
+    // Override the title with the web-sourced title
+    payload.product.title = title;
+
+    const newProduct = await sellibri.createProduct(payload);
+    const sellibriId = newProduct.id;
+    const variantId = newProduct.all_variants?.[0]?.id || 0;
+    logger.info(MODULE, `SKU=${sku}: created id=${sellibriId} title="${title}"`);
+
+    // 5. Update state
     const state = loadState();
     state.products[sku] = {
       sellibriId,
@@ -697,11 +695,10 @@ export async function syncSingleSku(sku: string): Promise<{ success: boolean; me
     };
     saveState(state);
 
+    const imagesCount = (newProduct.all_variants?.[0]?.images || []).length;
     return {
       success: true,
-      message: existing
-        ? `SKU ${sku} actualizado (overwrite completo)${imageMsg}`
-        : `SKU ${sku} creado en Sellibri${imageMsg}`,
+      message: `SKU ${sku} ${existingProduct ? 'recreado' : 'creado'} — "${title}"${imagesCount > 0 ? ` + ${imagesCount} imágenes` : ''}`,
     };
   } catch (err: any) {
     logger.error(MODULE, `Actualizar SKU=${sku} failed: ${err.message}`);

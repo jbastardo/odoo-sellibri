@@ -82,6 +82,58 @@ export interface OdooProduct {
   type: string;
 }
 
+/** Fetch the title displayed on the Odoo website for a product.
+ *  This reads the actual HTML page and extracts the og:title.
+ *  Used for single-SKU sync to get the exact title users see. */
+export async function fetchWebTitle(productTemplateId: number): Promise<string | null> {
+  try {
+    const https = await import('https');
+    const baseUrl = config.odoo.url.replace(/\/$/, '');
+    // Odoo website product URL pattern: /shop/<slug>-<template_id>
+    const url = `${baseUrl}/shop/product-${productTemplateId}`;
+    
+    const html: string = await new Promise((resolve, reject) => {
+      const req = https.get(url, { timeout: 10000 }, (resp) => {
+        // Follow redirects
+        if (resp.statusCode === 301 || resp.statusCode === 302) {
+          const location = resp.headers.location;
+          if (location) {
+            const fullUrl = location.startsWith('http') ? location : `${baseUrl}${location}`;
+            https.get(fullUrl, { timeout: 10000 }, (resp2) => {
+              let data = '';
+              resp2.on('data', (chunk: string) => data += chunk);
+              resp2.on('end', () => resolve(data));
+            }).on('error', reject);
+            return;
+          }
+        }
+        let data = '';
+        resp.on('data', (chunk: string) => data += chunk);
+        resp.on('end', () => resolve(data));
+      });
+      req.on('error', reject);
+    });
+
+    // Extract og:title (most reliable)
+    const ogMatch = html.match(/<meta\s+property="og:title"\s+content="([^"]+)"/i);
+    if (ogMatch && ogMatch[1].trim()) {
+      return ogMatch[1].trim();
+    }
+
+    // Fallback: extract <h1>
+    const h1Match = html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/);
+    if (h1Match) {
+      const text = h1Match[1].replace(/<[^>]+>/g, '').trim();
+      if (text) return text;
+    }
+
+    return null;
+  } catch (err: any) {
+    logger.warn(MODULE, `Could not fetch web title for template ${productTemplateId}: ${err.message}`);
+    return null;
+  }
+}
+
 export interface OdooProductImageUrls {
   mainUrl: string | null;
   additionalUrls: { id: number; url: string; position: number }[];
