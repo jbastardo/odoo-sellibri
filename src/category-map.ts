@@ -1,18 +1,24 @@
 // Odoo categ_id → Sellibri taxon_id mapping
+// Sellibri taxons (tutecnotienda.com):
+//   10920: REDES, 10921: COMPUTACION, 10916: ENERGIA,
+//   10917: TABLETS, 10919: ELECTRODOMESTISCOS, 10924: PORTATILES,
+//   10925: CELULARES, 10926: SERVIDORES, 10941: Impresoras,
+//   10922: ESCANNERS, 10923: CONSUMIBLES
+
 const CATEGORY_MAP: Record<number, number> = {
-  1353: 8328, // Alarma → Alarmas
-  1354: 8344, // CCTV → CCTV
-  1355: 8329, // Computación → Computación
-  1356: 8330, // Control Acceso → Control de Acceso
-  1358: 8331, // Electrónicos → Electrónicos
-  1360: 8332, // Ferretería → Ferretería
-  1361: 8333, // Iluminación → Iluminación
-  1362: 8334, // Oficina y Hogar → Oficina y Hogar
-  1363: 8335, // Redes → Redes
-  1364: 8336, // Seguridad → Seguridad
+  1353: 10920, // Alarma → REDES (no hay categoría Alarma en Sellibri)
+  1354: 10920, // CCTV → REDES (no hay categoría CCTV en Sellibri)
+  1355: 10921, // Computación → COMPUTACION
+  1356: 10920, // Control Acceso → REDES (no hay equivalente)
+  1358: 10919, // Electrónicos → ELECTRODOMESTISCOS
+  1360: 10920, // Ferretería → REDES (no hay equivalente)
+  1361: 10920, // Iluminación → REDES (no hay equivalente)
+  1362: 10921, // Oficina y Hogar → COMPUTACION
+  1363: 10920, // Redes → REDES
+  1364: 10920, // Seguridad → REDES
 };
 
-const DEFAULT_TAXON_ID = 8318; // OTROS
+const DEFAULT_TAXON_ID = 10920; // REDES (default)
 
 export function mapCategory(odooCategId: number): number {
   return CATEGORY_MAP[odooCategId] ?? DEFAULT_TAXON_ID;
