@@ -6,7 +6,7 @@ export const config = {
     apiKey: process.env.ODOO_API_KEY || '',
   },
   sellibri: {
-    baseUrl: process.env.SELLIBRI_BASE_URL || 'https://tutecnotienda.com/api/v1',
+    baseUrl: process.env.SELLIBRI_BASE_URL || 'https://onprotec.com/api/v1',
     apiKey: process.env.SELLIBRI_API_KEY || '',
     stockLocationId: parseInt(process.env.SELLIBRI_STOCK_LOCATION_ID || '1206', 10),
     taxRateId: parseInt(process.env.SELLIBRI_TAX_RATE_ID || '4049', 10),
