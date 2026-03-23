@@ -218,8 +218,23 @@ function removeCatalogEntry(sku: string): void {
 
 // ─── Catalog Loading (internal) ────────────────────────────────
 
+// Duplicate products found during catalog load (same SKU, different product IDs)
+// These need to be cleaned up to avoid duplicates in Sellibri.
+let duplicateProducts: { sku: string; id: number }[] = [];
+
+/** Get the list of duplicate product IDs found during the last catalog load */
+export function getDuplicates(): { sku: string; id: number }[] {
+  return duplicateProducts;
+}
+
+/** Clear the duplicates list (after cleanup) */
+export function clearDuplicates(): void {
+  duplicateProducts = [];
+}
+
 async function fetchAllProductsFromApi(): Promise<Map<string, SellibriProduct>> {
   const map = new Map<string, SellibriProduct>();
+  duplicateProducts = [];
   let page = 1;
   const perPage = 50;
   let consecutiveErrors = 0;
@@ -235,7 +250,14 @@ async function fetchAllProductsFromApi(): Promise<Map<string, SellibriProduct>> 
       for (const p of products) {
         for (const v of p.all_variants || []) {
           if (v.sku) {
-            map.set(v.sku, p);
+            const existing = map.get(v.sku);
+            if (existing && existing.id !== p.id) {
+              // Duplicate SKU! Keep the one already in the map, mark this one for deletion
+              duplicateProducts.push({ sku: v.sku, id: p.id });
+              logger.warn(MODULE, `Duplicate SKU=${v.sku}: keeping id=${existing.id}, marking id=${p.id} for deletion`);
+            } else {
+              map.set(v.sku, p);
+            }
           }
         }
       }
@@ -256,6 +278,9 @@ async function fetchAllProductsFromApi(): Promise<Map<string, SellibriProduct>> 
     page++;
   }
 
+  if (duplicateProducts.length > 0) {
+    logger.warn(MODULE, `Found ${duplicateProducts.length} duplicate SKUs — will be deleted during sync`);
+  }
   logger.info(MODULE, `Sellibri catalog loaded: ${page} pages, ${map.size} SKUs`);
   return map;
 }

@@ -191,10 +191,9 @@ function buildImagesPayload(odooProduct: odoo.OdooProduct): sellibri.SellibriIma
 }
 
 // ─── Payload Builder: FULL OVERWRITE ───────────────────────────
-// Odoo is master: every field is written from Odoo to Sellibri.
-// Used for both CREATE and UPDATE — always the same complete payload.
+// Used for CREATE and for Actualizar SKU (forced overwrite).
 
-function buildMirrorPayload(
+function buildFullPayload(
   odooProduct: odoo.OdooProduct,
   includeImages: boolean = true,
 ): sellibri.SellibriProductPayload {
@@ -221,7 +220,6 @@ function buildMirrorPayload(
     }],
   };
 
-  // Include images if requested
   if (includeImages) {
     const imagesAttrs = buildImagesPayload(odooProduct);
     if (imagesAttrs.length > 0) {
@@ -242,18 +240,140 @@ function buildMirrorPayload(
   };
 }
 
+// ─── Smart Diff: compare Odoo vs Sellibri, return payload ONLY if different ──
+// Returns null if nothing changed (= skip the API call).
+// Odoo is always master: when a field differs, the Odoo value wins.
+
+function buildDiffPayload(
+  odooProduct: odoo.OdooProduct,
+  sp: sellibri.SellibriProduct,
+): sellibri.SellibriProductPayload | null {
+  const variant = sp.all_variants?.[0];
+  if (!variant) return buildFullPayload(odooProduct, false); // no variant = broken, overwrite
+
+  const odooPrice = getSellibriPrice(odooProduct);
+  const odooStock = Math.max(0, Math.floor(odooProduct.qty_available || 0));
+  const odooTitle = cleanTitle(odooProduct.name);
+  const odooDescription = odooProduct.website_description || odooProduct.description_sale || '';
+  const categId = Array.isArray(odooProduct.categ_id) ? odooProduct.categ_id[0] : 0;
+  const taxonId = mapCategory(categId);
+  const vendorId = mapBrandToVendor(odooProduct.brand_id);
+
+  let needsUpdate = false;
+  const productFields: Record<string, any> = {};
+  const masterAttrs: sellibri.SellibriMasterAttributes = {
+    sku: odooProduct.default_code,
+    track_inventory: true,
+    tax_rate_id: config.sellibri.taxRateId,
+  };
+
+  // Status: must be active
+  if (sp.status !== 'active') {
+    needsUpdate = true;
+  }
+
+  // Slug
+  if ((sp.slug || '') !== odooProduct.default_code) {
+    productFields.slug = odooProduct.default_code;
+    needsUpdate = true;
+  }
+
+  // Title
+  if ((sp.title || '') !== odooTitle) {
+    productFields.title = odooTitle;
+    needsUpdate = true;
+  }
+
+  // Description (Odoo is master — overwrite if different)
+  const sellibriDesc = (sp.description || '').trim();
+  const cleanOdooDesc = (typeof odooDescription === 'string' ? odooDescription : '').trim();
+  if (cleanOdooDesc && sellibriDesc !== cleanOdooDesc) {
+    productFields.description = cleanOdooDesc;
+    needsUpdate = true;
+  }
+
+  // Price
+  const currentPrice = parseFloat(variant.price || '0');
+  const newPrice = parseFloat(odooPrice);
+  if (Math.abs(currentPrice - newPrice) > 0.01) {
+    masterAttrs.price = odooPrice;
+    needsUpdate = true;
+  }
+
+  // Stock
+  const currentStock = variant.stock_items?.[0]?.available ?? 0;
+  if (currentStock !== odooStock) {
+    masterAttrs.stock_items_attributes = [{
+      stock_location_id: config.sellibri.stockLocationId,
+      available: odooStock,
+    }];
+    needsUpdate = true;
+  }
+
+  // Category
+  const currentTaxons = sp.taxon_ids || [];
+  if (!currentTaxons.includes(taxonId)) {
+    productFields.taxon_ids = [taxonId];
+    needsUpdate = true;
+  }
+
+  // Brand/Vendor
+  if (vendorId && sp.product_vendor_id !== vendorId) {
+    productFields.product_vendor_id = vendorId;
+    needsUpdate = true;
+  }
+
+  // Barcode
+  if (odooProduct.barcode && (variant.barcode || '') !== odooProduct.barcode) {
+    masterAttrs.barcode = odooProduct.barcode;
+    needsUpdate = true;
+  }
+
+  // Weight
+  const currentWeight = parseFloat(variant.weight || '0');
+  if (odooProduct.weight && Math.abs(currentWeight - odooProduct.weight) > 0.01) {
+    masterAttrs.weight = odooProduct.weight;
+    needsUpdate = true;
+  }
+
+  // Images: check if Sellibri has no images but Odoo does
+  const sellibriImages = variant.images || [];
+  if (sellibriImages.length === 0) {
+    const imagesAttrs = buildImagesPayload(odooProduct);
+    if (imagesAttrs.length > 0) {
+      masterAttrs.images_attributes = imagesAttrs;
+      needsUpdate = true;
+    }
+  }
+
+  if (!needsUpdate) return null;
+
+  return {
+    product: {
+      title: productFields.title || sp.title || odooTitle,
+      ...(productFields.slug ? { slug: productFields.slug } : {}),
+      status: 'active',
+      ...(productFields.description !== undefined ? { description: productFields.description } : {}),
+      ...(productFields.product_vendor_id ? { product_vendor_id: productFields.product_vendor_id } : {}),
+      master_attributes: masterAttrs,
+      taxon_ids: productFields.taxon_ids || sp.taxon_ids || [taxonId],
+    },
+  };
+}
+
 // ═══════════════════════════════════════════════════════════════
-// SYNC ESPEJO — Full mirror: create, update, delete
+// SYNC ESPEJO — Compare, correct, create, delete
 // ═══════════════════════════════════════════════════════════════
 //
 // 1. Fetch ALL active products from Odoo
 // 2. Fetch ALL products from Sellibri (catalog)
 // 3. For each Odoo product:
-//    - If in Sellibri → UPDATE with full overwrite
-//    - If NOT in Sellibri → CREATE
+//    - If in Sellibri → COMPARE field by field, PATCH only diffs
+//    - If NOT in Sellibri → CREATE with full payload
 // 4. For each Sellibri product NOT in Odoo → DELETE
 //
-// This guarantees Sellibri is always an exact mirror.
+// This is efficient: only products with actual differences
+// generate API calls. Identical products are skipped.
 // ═══════════════════════════════════════════════════════════════
 
 export interface MirrorSyncResult {
@@ -261,6 +381,7 @@ export interface MirrorSyncResult {
   sellibriTotal: number;
   created: number;
   updated: number;
+  unchanged: number;
   deleted: number;
   skippedInvalid: number;
   errors: number;
@@ -269,7 +390,7 @@ export interface MirrorSyncResult {
 export async function syncMirror(): Promise<MirrorSyncResult> {
   if (mirrorSyncRunning || stockSyncRunning) {
     logger.warn(MODULE, 'Mirror sync: another sync is running, skipping');
-    return { odooTotal: 0, sellibriTotal: 0, created: 0, updated: 0, deleted: 0, skippedInvalid: 0, errors: 0 };
+    return { odooTotal: 0, sellibriTotal: 0, created: 0, updated: 0, unchanged: 0, deleted: 0, skippedInvalid: 0, errors: 0 };
   }
   mirrorSyncRunning = true;
   syncStatus.isRunning = true;
@@ -277,7 +398,7 @@ export async function syncMirror(): Promise<MirrorSyncResult> {
 
   const result: MirrorSyncResult = {
     odooTotal: 0, sellibriTotal: 0, created: 0, updated: 0,
-    deleted: 0, skippedInvalid: 0, errors: 0,
+    unchanged: 0, deleted: 0, skippedInvalid: 0, errors: 0,
   };
   const state = loadState();
   const startTime = Date.now();
@@ -331,10 +452,15 @@ export async function syncMirror(): Promise<MirrorSyncResult> {
         const existing = sellibriCatalog.get(sku);
 
         if (existing) {
-          // ── UPDATE: overwrite all fields from Odoo ──
-          const payload = buildMirrorPayload(product, true);
-          await sellibri.updateProduct(existing.id, payload);
-          result.updated++;
+          // ── EXISTS: compare field by field, only patch if different ──
+          const diffPayload = buildDiffPayload(product, existing);
+
+          if (diffPayload) {
+            await sellibri.updateProduct(existing.id, diffPayload);
+            result.updated++;
+          } else {
+            result.unchanged++;
+          }
 
           state.products[sku] = {
             sellibriId: existing.id,
@@ -345,8 +471,8 @@ export async function syncMirror(): Promise<MirrorSyncResult> {
             lastPrice: getSellibriPrice(product),
           };
         } else {
-          // ── CREATE: new product in Sellibri ──
-          const payload = buildMirrorPayload(product, true);
+          // ── MISSING: create with full payload + images ──
+          const payload = buildFullPayload(product, true);
           const newProduct = await sellibri.createProduct(payload);
           result.created++;
           logger.info(MODULE, `Created SKU=${sku} (id=${newProduct.id})`);
@@ -375,19 +501,13 @@ export async function syncMirror(): Promise<MirrorSyncResult> {
 
       if (processed % 100 === 0) {
         saveState(state);
-        logger.info(MODULE, `Progress: ${processed}/${totalWork} (created=${result.created}, updated=${result.updated}, errors=${result.errors})`);
+        logger.info(MODULE, `Progress: ${processed}/${totalWork} (created=${result.created}, updated=${result.updated}, unchanged=${result.unchanged}, errors=${result.errors})`);
       }
     }
 
-    // ── Phase 3: Delete orphans (in Sellibri but NOT in Odoo) ──
+    // ── Phase 3: Delete orphans + duplicates ──
     if (!abortRequested) {
-      syncStatus.progress = {
-        current: 0, total: 0,
-        phase: 'Espejo: eliminando productos huérfanos de Sellibri...',
-        startedAt: syncStatus.progress?.startedAt || new Date().toISOString(),
-        estimatedSecondsLeft: null,
-      };
-
+      // 3a. Orphans: in Sellibri but NOT in Odoo (archived/deleted)
       const orphans: { sku: string; sellibriId: number }[] = [];
       const seenIds = new Set<number>();
 
@@ -398,23 +518,54 @@ export async function syncMirror(): Promise<MirrorSyncResult> {
         }
       }
 
-      if (orphans.length > 0) {
-        logger.info(MODULE, `Mirror sync: ${orphans.length} orphan products to delete`);
-        const deleteStart = Date.now();
+      // 3b. Duplicates: same SKU, multiple product IDs in Sellibri
+      const duplicates = sellibri.getDuplicates();
 
-        for (let i = 0; i < orphans.length; i++) {
+      const totalToDelete = orphans.length + duplicates.length;
+
+      if (totalToDelete > 0) {
+        syncStatus.progress = {
+          current: 0, total: totalToDelete,
+          phase: `Eliminando ${orphans.length} huérfanos + ${duplicates.length} duplicados...`,
+          startedAt: syncStatus.progress?.startedAt || new Date().toISOString(),
+          estimatedSecondsLeft: null,
+        };
+
+        logger.info(MODULE, `To delete: ${orphans.length} orphans, ${duplicates.length} duplicates`);
+        const deleteStart = Date.now();
+        let deleteIdx = 0;
+
+        // Delete orphans
+        for (const orphan of orphans) {
           if (abortRequested) break;
-          const orphan = orphans[i];
           try {
             await sellibri.deleteProduct(orphan.sellibriId, orphan.sku);
             result.deleted++;
             delete state.products[orphan.sku];
           } catch (err: any) {
             result.errors++;
-            logger.error(MODULE, `Delete error SKU=${orphan.sku}: ${err.message}`);
+            logger.error(MODULE, `Delete orphan error SKU=${orphan.sku}: ${err.message}`);
           }
-          updateProgress(i + 1, orphans.length, deleteStart, 'Eliminando:');
+          deleteIdx++;
+          updateProgress(deleteIdx, totalToDelete, deleteStart, 'Eliminando:');
         }
+
+        // Delete duplicates
+        for (const dup of duplicates) {
+          if (abortRequested) break;
+          try {
+            await sellibri.deleteProduct(dup.id, dup.sku);
+            result.deleted++;
+            logger.info(MODULE, `Deleted duplicate SKU=${dup.sku} id=${dup.id}`);
+          } catch (err: any) {
+            result.errors++;
+            logger.error(MODULE, `Delete duplicate error SKU=${dup.sku} id=${dup.id}: ${err.message}`);
+          }
+          deleteIdx++;
+          updateProgress(deleteIdx, totalToDelete, deleteStart, 'Eliminando:');
+        }
+
+        sellibri.clearDuplicates();
       }
     }
 
@@ -433,7 +584,7 @@ export async function syncMirror(): Promise<MirrorSyncResult> {
     syncStatus.productsSynced = Object.keys(state.products).length;
 
     const totalTime = ((Date.now() - startTime) / 1000 / 60).toFixed(1);
-    logger.info(MODULE, `Mirror sync ${abortRequested ? 'ABORTED' : 'complete'} in ${totalTime}min: ${result.created} created, ${result.updated} updated, ${result.deleted} deleted, ${result.skippedInvalid} invalid, ${result.errors} errors`);
+    logger.info(MODULE, `Mirror sync ${abortRequested ? 'ABORTED' : 'complete'} in ${totalTime}min: ${result.created} created, ${result.updated} corrected, ${result.unchanged} unchanged, ${result.deleted} deleted, ${result.skippedInvalid} invalid, ${result.errors} errors`);
   } catch (err: any) {
     syncStatus.lastError = err.message;
     logger.error(MODULE, `Mirror sync failed: ${err.message}`);
@@ -478,7 +629,7 @@ export async function syncSingleSku(sku: string): Promise<{ success: boolean; me
     }
 
     // Build full overwrite payload WITH images
-    const payload = buildMirrorPayload(odooProduct, true);
+    const payload = buildFullPayload(odooProduct, true);
 
     let sellibriId: number;
     let variantId: number;

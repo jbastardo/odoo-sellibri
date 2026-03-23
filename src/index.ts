@@ -57,7 +57,7 @@ app.post('/api/sync/mirror', async (_req, res) => {
   }
   res.json({ message: 'Sync espejo iniciada — comparando Odoo vs Sellibri...' });
   syncMirror()
-    .then(r => logger.info('api', `Espejo: ${r.created} creados, ${r.updated} actualizados, ${r.deleted} eliminados, ${r.skippedInvalid} inválidos, ${r.errors} errores`))
+    .then(r => logger.info('api', `Espejo: ${r.created} creados, ${r.updated} corregidos, ${r.unchanged} sin cambios, ${r.deleted} eliminados, ${r.skippedInvalid} inválidos, ${r.errors} errores`))
     .catch(err => logger.error('api', `Sync espejo error: ${err.message}`))
     .finally(() => endManualAction('Sync Espejo'));
 });
