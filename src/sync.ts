@@ -129,19 +129,27 @@ export function resetSyncState(): void {
 
 /**
  * Remove Odoo's copy/duplicate markers from a product name.
- * Examples:
- *   "Producto X (copia)" → "Producto X"
- *   "Producto X (Copia) (Copia)" → "Producto X"
- *   "Producto X (copiar)" → "Producto X"
- *   "Producto X (copy)" → "Producto X"
- *   "Producto X (copia 2)" → "Producto X"
  */
-function cleanTitle(name: string): string {
+function cleanName(name: string): string {
   if (!name) return name;
   return name
     .replace(/\s*\(copia[r]?(\s*\d*)?\)/gi, '')
     .replace(/\s*\(copy(\s*\d*)?\)/gi, '')
     .trim();
+}
+
+/**
+ * Get the title that should be displayed for a product.
+ * Priority: seo_name > name (cleaned of copy markers)
+ * seo_name is what the Odoo website shows to users.
+ * When products are duplicated in Odoo, the 'name' field may keep
+ * the old product's name, but seo_name is always the user-edited title.
+ */
+function getProductTitle(product: odoo.OdooProduct): string {
+  if (product.seo_name && typeof product.seo_name === 'string' && product.seo_name.trim()) {
+    return product.seo_name.trim();
+  }
+  return cleanName(product.name);
 }
 
 function getSellibriPrice(product: odoo.OdooProduct): string {
@@ -179,7 +187,7 @@ function isValidForSellibri(product: odoo.OdooProduct): boolean {
 function buildImagesPayload(odooProduct: odoo.OdooProduct): sellibri.SellibriImageAttribute[] {
   const imageUrls = odoo.buildImageUrls(odooProduct);
   const attrs: sellibri.SellibriImageAttribute[] = [];
-  const title = cleanTitle(odooProduct.name);
+  const title = getProductTitle(odooProduct);
 
   if (imageUrls.mainUrl) {
     attrs.push({ remote_url: imageUrls.mainUrl, position: 1, alt: title });
@@ -202,7 +210,7 @@ function buildFullPayload(
   const categId = Array.isArray(odooProduct.categ_id) ? odooProduct.categ_id[0] : 0;
   const taxonId = mapCategory(categId);
   const vendorId = mapBrandToVendor(odooProduct.brand_id);
-  const title = cleanTitle(odooProduct.name);
+  const title = getProductTitle(odooProduct);
 
   const masterAttrs: sellibri.SellibriMasterAttributes = {
     sku: odooProduct.default_code,
@@ -253,7 +261,7 @@ function buildDiffPayload(
 
   const odooPrice = getSellibriPrice(odooProduct);
   const odooStock = Math.max(0, Math.floor(odooProduct.qty_available || 0));
-  const odooTitle = cleanTitle(odooProduct.name);
+  const odooTitle = getProductTitle(odooProduct);
   const categId = Array.isArray(odooProduct.categ_id) ? odooProduct.categ_id[0] : 0;
   const taxonId = mapCategory(categId);
   const vendorId = mapBrandToVendor(odooProduct.brand_id);

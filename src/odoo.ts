@@ -63,6 +63,7 @@ async function execute(model: string, method: string, args: any[], kwargs: Recor
 export interface OdooProduct {
   id: number;
   name: string;
+  seo_name: string | false;
   default_code: string;
   list_price: number;
   price_with_tax: number;
@@ -105,7 +106,7 @@ export async function fetchProducts(
   // Images are fetched individually per-product in fetchProductMainImage().
   const products = await execute('product.product', 'search_read', [domain], {
     fields: [
-      'name', 'default_code', 'list_price', 'price_with_tax', 'qty_available', 'weight',
+      'name', 'seo_name', 'default_code', 'list_price', 'price_with_tax', 'qty_available', 'weight',
       'barcode', 'categ_id', 'brand_id', 'description_sale',
       'website_description', 'product_tmpl_id', 'product_template_image_ids',
       'write_date', 'sale_ok', 'type',
@@ -311,7 +312,7 @@ export async function fetchProductBySku(sku: string): Promise<OdooProduct | null
     [['default_code', '=', sku], ['sale_ok', '=', true], ['type', 'in', ['product', 'consu']]],
   ], {
     fields: [
-      'name', 'default_code', 'list_price', 'price_with_tax', 'qty_available', 'weight',
+      'name', 'seo_name', 'default_code', 'list_price', 'price_with_tax', 'qty_available', 'weight',
       'barcode', 'categ_id', 'brand_id', 'description_sale',
       'website_description', 'product_tmpl_id', 'product_template_image_ids',
       'write_date', 'sale_ok', 'type',
