@@ -218,23 +218,29 @@ function removeCatalogEntry(sku: string): void {
 
 // ─── Catalog Loading (internal) ────────────────────────────────
 
-// Duplicate products found during catalog load (same SKU, different product IDs)
-// These need to be cleaned up to avoid duplicates in Sellibri.
+// Products to clean up, detected during catalog load:
+// - Duplicates: same SKU, different product IDs
+// - No-SKU: products without any SKU (junk/legacy data)
 let duplicateProducts: { sku: string; id: number }[] = [];
+let noSkuProducts: number[] = []; // product IDs without SKU
 
-/** Get the list of duplicate product IDs found during the last catalog load */
 export function getDuplicates(): { sku: string; id: number }[] {
   return duplicateProducts;
 }
 
-/** Clear the duplicates list (after cleanup) */
-export function clearDuplicates(): void {
+export function getNoSkuProducts(): number[] {
+  return noSkuProducts;
+}
+
+export function clearCleanupLists(): void {
   duplicateProducts = [];
+  noSkuProducts = [];
 }
 
 async function fetchAllProductsFromApi(): Promise<Map<string, SellibriProduct>> {
   const map = new Map<string, SellibriProduct>();
   duplicateProducts = [];
+  noSkuProducts = [];
   let page = 1;
   const perPage = 50;
   let consecutiveErrors = 0;
@@ -248,17 +254,20 @@ async function fetchAllProductsFromApi(): Promise<Map<string, SellibriProduct>> 
       consecutiveErrors = 0;
 
       for (const p of products) {
+        let productHasSku = false;
         for (const v of p.all_variants || []) {
-          if (v.sku) {
+          if (v.sku && v.sku.trim()) {
+            productHasSku = true;
             const existing = map.get(v.sku);
             if (existing && existing.id !== p.id) {
-              // Duplicate SKU! Keep the one already in the map, mark this one for deletion
               duplicateProducts.push({ sku: v.sku, id: p.id });
-              logger.warn(MODULE, `Duplicate SKU=${v.sku}: keeping id=${existing.id}, marking id=${p.id} for deletion`);
             } else {
               map.set(v.sku, p);
             }
           }
+        }
+        if (!productHasSku) {
+          noSkuProducts.push(p.id);
         }
       }
 
@@ -279,9 +288,12 @@ async function fetchAllProductsFromApi(): Promise<Map<string, SellibriProduct>> 
   }
 
   if (duplicateProducts.length > 0) {
-    logger.warn(MODULE, `Found ${duplicateProducts.length} duplicate SKUs — will be deleted during sync`);
+    logger.warn(MODULE, `Found ${duplicateProducts.length} duplicate SKUs — will be deleted`);
   }
-  logger.info(MODULE, `Sellibri catalog loaded: ${page} pages, ${map.size} SKUs`);
+  if (noSkuProducts.length > 0) {
+    logger.warn(MODULE, `Found ${noSkuProducts.length} products without SKU — will be deleted`);
+  }
+  logger.info(MODULE, `Sellibri catalog loaded: ${page} pages, ${map.size} SKUs, ${noSkuProducts.length} without SKU`);
   return map;
 }
 

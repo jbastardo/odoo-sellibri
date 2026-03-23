@@ -505,9 +505,11 @@ export async function syncMirror(): Promise<MirrorSyncResult> {
       }
     }
 
-    // ── Phase 3: Delete orphans + duplicates ──
+    // ── Phase 3: Delete everything in Sellibri that shouldn't exist ──
+    //   a) Orphans: have SKU but SKU not in Odoo
+    //   b) Duplicates: same SKU, multiple products
+    //   c) No-SKU: products without any SKU (junk/legacy)
     if (!abortRequested) {
-      // 3a. Orphans: in Sellibri but NOT in Odoo (archived/deleted)
       const orphans: { sku: string; sellibriId: number }[] = [];
       const seenIds = new Set<number>();
 
@@ -518,24 +520,25 @@ export async function syncMirror(): Promise<MirrorSyncResult> {
         }
       }
 
-      // 3b. Duplicates: same SKU, multiple product IDs in Sellibri
       const duplicates = sellibri.getDuplicates();
+      const noSkuIds = sellibri.getNoSkuProducts();
 
-      const totalToDelete = orphans.length + duplicates.length;
+      const totalToDelete = orphans.length + duplicates.length + noSkuIds.length;
 
       if (totalToDelete > 0) {
+        logger.info(MODULE, `To delete: ${orphans.length} orphans, ${duplicates.length} duplicates, ${noSkuIds.length} without SKU`);
+
         syncStatus.progress = {
           current: 0, total: totalToDelete,
-          phase: `Eliminando ${orphans.length} huérfanos + ${duplicates.length} duplicados...`,
+          phase: `Eliminando ${totalToDelete} productos sobrantes...`,
           startedAt: syncStatus.progress?.startedAt || new Date().toISOString(),
           estimatedSecondsLeft: null,
         };
 
-        logger.info(MODULE, `To delete: ${orphans.length} orphans, ${duplicates.length} duplicates`);
         const deleteStart = Date.now();
         let deleteIdx = 0;
 
-        // Delete orphans
+        // Delete orphans (have SKU but not in Odoo)
         for (const orphan of orphans) {
           if (abortRequested) break;
           try {
@@ -544,7 +547,7 @@ export async function syncMirror(): Promise<MirrorSyncResult> {
             delete state.products[orphan.sku];
           } catch (err: any) {
             result.errors++;
-            logger.error(MODULE, `Delete orphan error SKU=${orphan.sku}: ${err.message}`);
+            logger.error(MODULE, `Delete orphan SKU=${orphan.sku}: ${err.message}`);
           }
           deleteIdx++;
           updateProgress(deleteIdx, totalToDelete, deleteStart, 'Eliminando:');
@@ -556,16 +559,34 @@ export async function syncMirror(): Promise<MirrorSyncResult> {
           try {
             await sellibri.deleteProduct(dup.id, dup.sku);
             result.deleted++;
-            logger.info(MODULE, `Deleted duplicate SKU=${dup.sku} id=${dup.id}`);
           } catch (err: any) {
             result.errors++;
-            logger.error(MODULE, `Delete duplicate error SKU=${dup.sku} id=${dup.id}: ${err.message}`);
+            logger.error(MODULE, `Delete duplicate SKU=${dup.sku}: ${err.message}`);
           }
           deleteIdx++;
           updateProgress(deleteIdx, totalToDelete, deleteStart, 'Eliminando:');
         }
 
-        sellibri.clearDuplicates();
+        // Delete products without SKU (junk/legacy)
+        for (const id of noSkuIds) {
+          if (abortRequested) break;
+          try {
+            await sellibri.deleteProduct(id);
+            result.deleted++;
+          } catch (err: any) {
+            result.errors++;
+            logger.error(MODULE, `Delete no-SKU id=${id}: ${err.message}`);
+          }
+          deleteIdx++;
+          if (deleteIdx % 200 === 0) {
+            updateProgress(deleteIdx, totalToDelete, deleteStart, 'Eliminando:');
+            logger.info(MODULE, `Cleanup: ${deleteIdx}/${totalToDelete} (deleted=${result.deleted}, errors=${result.errors})`);
+          } else {
+            updateProgress(deleteIdx, totalToDelete, deleteStart, 'Eliminando:');
+          }
+        }
+
+        sellibri.clearCleanupLists();
       }
     }
 
