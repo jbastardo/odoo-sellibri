@@ -3,7 +3,7 @@ import * as path from 'path';
 import * as odoo from './odoo';
 import * as sellibri from './sellibri';
 import { config } from './config';
-import { mapCategory } from './category-map';
+import { mapCategory, buildCategoryMap } from './category-map';
 import { mapBrandToVendor } from './brand-map';
 import { logger } from './logger';
 
@@ -412,6 +412,11 @@ export async function syncMirror(): Promise<MirrorSyncResult> {
     const odooProducts = await odoo.fetchAllProducts(); // ALL active products (no write_date filter)
     result.odooTotal = odooProducts.length;
 
+    // Build dynamic category mapping (Odoo categories → Sellibri taxons)
+    logger.info(MODULE, 'Mirror sync: building category map...');
+    const odooCategories = await odoo.fetchActiveCategories();
+    await buildCategoryMap(odooCategories);
+
     logger.info(MODULE, 'Mirror sync: loading Sellibri catalog...');
     const sellibriCatalog = await sellibri.getCatalog(true); // force reload for accuracy
     result.sellibriTotal = sellibriCatalog.size;
@@ -638,7 +643,11 @@ export async function syncSingleSku(sku: string): Promise<{ success: boolean; me
       return { success: false, message: `SKU ${sku} no tiene datos válidos (precio=0 o sin nombre)` };
     }
 
-    // 2. Try to get the real title from the Odoo website
+    // 2. Build category map (ensures Odoo category exists in Sellibri)
+    const odooCategories = await odoo.fetchActiveCategories();
+    await buildCategoryMap(odooCategories);
+
+    // 3. Get the real title from the Odoo website
     //    (handles duplicated products where 'name' has the old product's name)
     let title = getProductTitle(odooProduct);
     const tmplId = Array.isArray(odooProduct.product_tmpl_id) ? odooProduct.product_tmpl_id[0] : 0;
@@ -650,7 +659,7 @@ export async function syncSingleSku(sku: string): Promise<{ success: boolean; me
       }
     }
 
-    // 3. Delete existing product in Sellibri (if any)
+    // 4. Delete existing product in Sellibri (if any)
     const catalog = await sellibri.getCatalog();
     let existingProduct = catalog.get(sku) || null;
 
@@ -673,7 +682,7 @@ export async function syncSingleSku(sku: string): Promise<{ success: boolean; me
       await sellibri.deleteProduct(existingProduct.id, sku);
     }
 
-    // 4. Create fresh product with correct title + images
+    // 5. Create fresh product with correct title + images
     const payload = buildFullPayload(odooProduct, true);
     // Override the title with the web-sourced title
     payload.product.title = title;
@@ -683,7 +692,7 @@ export async function syncSingleSku(sku: string): Promise<{ success: boolean; me
     const variantId = newProduct.all_variants?.[0]?.id || 0;
     logger.info(MODULE, `SKU=${sku}: created id=${sellibriId} title="${title}"`);
 
-    // 5. Update state
+    // 6. Update state
     const state = loadState();
     state.products[sku] = {
       sellibriId,

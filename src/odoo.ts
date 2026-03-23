@@ -466,6 +466,26 @@ export async function fetchExcludedProducts(): Promise<{ total: number; syncable
   return { total: all.length, syncable, excluded };
 }
 
+/** Fetch all product categories used by active products */
+export async function fetchActiveCategories(): Promise<{ id: number; name: string }[]> {
+  const cats = await execute('product.category', 'search_read', [
+    [['id', '!=', 0]],
+  ], { fields: ['name'], limit: 200 });
+
+  // Only return categories that have at least one active product
+  const products = await execute('product.product', 'search_read', [
+    [['sale_ok', '=', true], ['type', 'in', ['product', 'consu']], ['default_code', '!=', false]],
+  ], { fields: ['categ_id'], limit: 10000 });
+
+  const usedIds = new Set<number>();
+  for (const p of products) {
+    const cid = Array.isArray(p.categ_id) ? p.categ_id[0] : 0;
+    if (cid) usedIds.add(cid);
+  }
+
+  return (cats as { id: number; name: string }[]).filter(c => usedIds.has(c.id));
+}
+
 export async function createSaleOrder(partnerId: number, lines: { product_id: number; product_uom_qty: number; price_unit: number }[]): Promise<number> {
   const orderLines = lines.map(l => [0, 0, {
     product_id: l.product_id,
