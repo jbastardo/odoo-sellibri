@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Odoo ↔ Sellibri — ONPROTEC</title>
+  <title>Odoo → Sellibri — ONPROTEC</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <style>
     .log-info { color: #3b82f6; }
@@ -16,13 +16,14 @@
 <body class="bg-gray-900 text-gray-100 min-h-screen">
   <div class="max-w-6xl mx-auto p-6">
     <header class="mb-8">
-      <h1 class="text-3xl font-bold">Odoo ↔ Sellibri</h1>
-      <p class="text-gray-400 mt-1">ONPROTEC — Integration Dashboard
-        <span class="ml-3 px-2 py-0.5 text-xs bg-green-900 text-green-300 rounded">Cron activo: precio/stock cada 15 min</span>
+      <h1 class="text-3xl font-bold">Odoo → Sellibri</h1>
+      <p class="text-gray-400 mt-1">ONPROTEC — Espejo de productos
+        <span class="ml-3 px-2 py-0.5 text-xs bg-green-900 text-green-300 rounded">Espejo: cada 1h</span>
+        <span class="ml-1 px-2 py-0.5 text-xs bg-blue-900 text-blue-300 rounded">Precio/Stock: cada 15min</span>
       </p>
     </header>
 
-    <!-- Progress Banner (shown during sync) -->
+    <!-- Progress Banner -->
     <div id="progress-banner" class="hidden mb-6 bg-blue-900/40 border border-blue-700 rounded-lg p-4">
       <div class="flex items-center justify-between mb-2">
         <span id="progress-phase" class="text-sm font-medium text-blue-200">Sincronizando...</span>
@@ -41,8 +42,8 @@
         <div id="products-synced" class="text-2xl font-bold mt-1">—</div>
       </div>
       <div class="bg-gray-800 rounded-lg p-4">
-        <div class="text-sm text-gray-400">Última sync productos</div>
-        <div id="last-product-sync" class="text-sm font-mono mt-1">—</div>
+        <div class="text-sm text-gray-400">Última sync espejo</div>
+        <div id="last-mirror-sync" class="text-sm font-mono mt-1">—</div>
       </div>
       <div class="bg-gray-800 rounded-lg p-4">
         <div class="text-sm text-gray-400">Última sync precio/stock</div>
@@ -56,27 +57,14 @@
 
     <!-- Action Buttons -->
     <div class="flex flex-wrap gap-3 mb-6">
-      <button onclick="triggerSync('products')" id="btn-products"
+      <button onclick="triggerMirror()" id="btn-mirror"
         class="bg-blue-600 hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed text-white px-4 py-2 rounded-lg font-medium transition">
-        Sincronizar Productos
+        🔄 Sync Espejo
       </button>
-      <button onclick="triggerSync('stock')" id="btn-stock"
+      <button onclick="triggerPriceStock()" id="btn-stock"
         class="bg-green-600 hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed text-white px-4 py-2 rounded-lg font-medium transition">
-        Precio/Stock
+        💰 Forzar Precio/Stock
       </button>
-      <button onclick="triggerCleanup()" id="btn-cleanup"
-        class="bg-purple-600 hover:bg-purple-700 disabled:opacity-50 disabled:cursor-not-allowed text-white px-4 py-2 rounded-lg font-medium transition">
-        🧹 Limpieza
-      </button>
-      <button onclick="triggerFixTitles()" id="btn-fix-titles"
-        class="bg-teal-600 hover:bg-teal-700 disabled:opacity-50 disabled:cursor-not-allowed text-white px-4 py-2 rounded-lg font-medium transition">
-        📝 Corregir Títulos/SKU
-      </button>
-      <button onclick="triggerImageSync()" id="btn-images"
-        class="bg-pink-600 hover:bg-pink-700 disabled:opacity-50 disabled:cursor-not-allowed text-white px-4 py-2 rounded-lg font-medium transition">
-        🖼️ Sync Imágenes
-      </button>
-
       <button onclick="abortSync()" id="btn-abort"
         class="hidden bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-lg font-medium transition">
         ⛔ Detener
@@ -168,43 +156,37 @@
       return `~${min}m ${sec}s restantes`;
     }
 
+    function disableAllActions() {
+      document.getElementById('btn-mirror').disabled = true;
+      document.getElementById('btn-stock').disabled = true;
+    }
+
     async function fetchStatus() {
       try {
         const resp = await fetch('/api/status');
         const data = await resp.json();
         const sync = data.sync;
 
-        // Cards
         document.getElementById('products-synced').textContent = sync.productsSynced || 0;
-        document.getElementById('last-product-sync').textContent = formatDate(sync.lastProductSync);
+        document.getElementById('last-mirror-sync').textContent = formatDate(sync.lastMirrorSync);
         document.getElementById('last-stock-sync').textContent = formatDate(sync.lastStockSync);
 
         const statusEl = document.getElementById('sync-status');
-        const btnProducts = document.getElementById('btn-products');
+        const btnMirror = document.getElementById('btn-mirror');
         const btnStock = document.getElementById('btn-stock');
-
         const btnAbort = document.getElementById('btn-abort');
-        const btnCleanup = document.getElementById('btn-cleanup');
-        const btnFixTitles = document.getElementById('btn-fix-titles');
-        const btnImages = document.getElementById('btn-images');
 
         if (sync.isRunning) {
           statusEl.textContent = 'Sincronizando...';
           statusEl.className = 'text-lg font-bold mt-1 text-yellow-400';
-          btnProducts.disabled = true;
+          btnMirror.disabled = true;
           btnStock.disabled = true;
-          btnCleanup.disabled = true;
-          btnFixTitles.disabled = true;
-          btnImages.disabled = true;
           btnAbort.classList.remove('hidden');
         } else {
           statusEl.textContent = 'Inactivo';
           statusEl.className = 'text-lg font-bold mt-1 text-green-400';
-          btnProducts.disabled = false;
+          btnMirror.disabled = false;
           btnStock.disabled = false;
-          btnCleanup.disabled = false;
-          btnFixTitles.disabled = false;
-          btnImages.disabled = false;
           btnAbort.classList.add('hidden');
         }
 
@@ -268,53 +250,21 @@
       }
     }
 
-    async function triggerFixTitles() {
-      if (!confirm('¿Iniciar corrección de títulos y SKU?\nEsto comparará Odoo con Sellibri y corregirá las diferencias.')) return;
+    async function triggerMirror() {
+      if (!confirm('¿Iniciar sync espejo?\nEsto comparará TODOS los productos de Odoo con Sellibri:\n- Crea los faltantes\n- Actualiza los existentes\n- Elimina los que ya no están en Odoo')) return;
       try {
         disableAllActions();
-        await fetch('/api/sync/fix-titles-sku', { method: 'POST' });
+        await fetch('/api/sync/mirror', { method: 'POST' });
         setTimeout(fetchStatus, 1000);
       } catch (err) {
         alert('Error: ' + err.message);
       }
     }
 
-    async function triggerSync(type) {
+    async function triggerPriceStock() {
       try {
         disableAllActions();
-        await fetch(`/api/sync/${type}`, { method: 'POST' });
-        setTimeout(fetchStatus, 1000);
-      } catch (err) {
-        alert('Error: ' + err.message);
-      }
-    }
-
-    async function triggerCleanup() {
-      if (!confirm('¿Iniciar limpieza?\nEsto eliminará de Sellibri los productos que no existen en Odoo.')) return;
-      try {
-        disableAllActions();
-        await fetch('/api/sync/cleanup', { method: 'POST' });
-        setTimeout(fetchStatus, 1000);
-      } catch (err) {
-        alert('Error: ' + err.message);
-      }
-    }
-
-
-
-    function disableAllActions() {
-      document.getElementById('btn-products').disabled = true;
-      document.getElementById('btn-stock').disabled = true;
-      document.getElementById('btn-cleanup').disabled = true;
-      document.getElementById('btn-fix-titles').disabled = true;
-      document.getElementById('btn-images').disabled = true;
-    }
-
-    async function triggerImageSync() {
-      if (!confirm('¿Sincronizar imágenes de Odoo a Sellibri?\nSolo se procesarán productos sin imágenes en Sellibri.')) return;
-      try {
-        disableAllActions();
-        await fetch('/api/sync/images', { method: 'POST' });
+        await fetch('/api/sync/stock', { method: 'POST' });
         setTimeout(fetchStatus, 1000);
       } catch (err) {
         alert('Error: ' + err.message);
@@ -463,7 +413,7 @@
     }
 
     fetchStatus();
-    setInterval(fetchStatus, 5000); // Refresh every 5s (faster during sync)
+    setInterval(fetchStatus, 5000);
   </script>
 </body>
 </html>
