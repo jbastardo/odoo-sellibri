@@ -574,6 +574,7 @@ export async function syncSingleSku(sku: string): Promise<{ success: boolean; me
   logger.info(MODULE, `Actualizar SKU=${sku}...`);
   try {
     const odooProduct = await odoo.fetchProductBySku(sku);
+        logger.info(MODULE, `SKU=${sku} DIAG: id=${odooProduct?.id}, name="${odooProduct?.name}", tmpl_id=${JSON.stringify(odooProduct?.product_tmpl_id)}, categ=${JSON.stringify(odooProduct?.categ_id)}`);
     if (!odooProduct) {
       return { success: false, message: `SKU ${sku} no encontrado en Odoo` };
     }
@@ -585,6 +586,7 @@ export async function syncSingleSku(sku: string): Promise<{ success: boolean; me
     await buildCategoryMap(odooCategories);
 
     const title = await getProductTitle(odooProduct);
+        logger.info(MODULE, `SKU=${sku} DIAG: resolved title="${title}"`);
 
     const catalog = await sellibri.getCatalog();
     let existingProduct = catalog.get(sku) || null;
