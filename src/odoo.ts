@@ -439,7 +439,8 @@ export async function fetchTemplateName(productTmplId: number): Promise<string |
   try {
     const result = await execute('product.template', 'read', [[productTmplId]], {
                   fields: ['name', 'display_name', 'website_name'],
-          if (result && result.length > 0) {
+              });
+    if (result && result.length > 0) {
         logger.info(MODULE, `fetchTemplateName(${productTmplId}): name="${result[0].name}", website_name="${result[0].website_name}", display_name="${result[0].display_name}"`);
             const tmpl = result[0];
       // Priorizar website_name (nombre editado en e-commerce) sobre name (heredado al duplicar)
