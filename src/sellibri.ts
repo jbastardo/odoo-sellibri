@@ -335,3 +335,4 @@ async function buildDiffPayload(
   if (vendorId && sp.product_vendor_id !== vendorId) {
     productFields.product_vendor_id = vendorId;
     needsUpdate = true;
+}
