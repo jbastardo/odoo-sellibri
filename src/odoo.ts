@@ -451,6 +451,22 @@ export async function fetchTemplateName(productTmplId: number): Promise<string |
     logger.warn(MODULE, `Failed to fetch template name for tmpl_id=${productTmplId}: ${err.message}`);
     return null;
   }
+
+/** Fetch website_description from product.template */
+export async function fetchTemplateDescription(productTmplId: number): Promise<string | null> {
+  try {
+    const result = await execute('product.template', 'read', [[productTmplId]], {
+                          fields: ['website_description'],
+                        });
+    if (result && result.length > 0 && result[0].website_description) {
+      return result[0].website_description;
+    }
+    return null;
+  } catch (err: any) {
+    logger.warn(MODULE, `Failed to fetch template description for tmpl_id=${productTmplId}: ${err.message}`);
+    return null;
+  }
+}
 }
 
 export async function createSaleOrder(partnerId: number, lines: { product_id: number; product_uom_qty: number; price_unit: number }[]): Promise<number> {
