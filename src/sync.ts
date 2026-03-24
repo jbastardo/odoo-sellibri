@@ -140,15 +140,11 @@ function cleanName(name: string): string {
 
 /**
  * Get the title that should be displayed for a product.
- * Priority: seo_name > name (cleaned of copy markers)
- * seo_name is what the Odoo website shows to users.
- * When products are duplicated in Odoo, the 'name' field may keep
- * the old product's name, but seo_name is always the user-edited title.
+ * Uses the 'name' field from product.template (inherited by product.product).
+ * This is the exact field shown in the Odoo backend UI — the single source of truth.
+ * Cleaned of Odoo's copy/duplicate markers (e.g. "(copiar)", "(copy)").
  */
 function getProductTitle(product: odoo.OdooProduct): string {
-  if (product.seo_name && typeof product.seo_name === 'string' && product.seo_name.trim()) {
-    return product.seo_name.trim();
-  }
   return cleanName(product.name);
 }
 
@@ -647,17 +643,8 @@ export async function syncSingleSku(sku: string): Promise<{ success: boolean; me
     const odooCategories = await odoo.fetchActiveCategories();
     await buildCategoryMap(odooCategories);
 
-    // 3. Get the real title from the Odoo website
-    //    (handles duplicated products where 'name' has the old product's name)
-    let title = getProductTitle(odooProduct);
-    const tmplId = Array.isArray(odooProduct.product_tmpl_id) ? odooProduct.product_tmpl_id[0] : 0;
-    if (tmplId) {
-      const webTitle = await odoo.fetchWebTitle(tmplId);
-      if (webTitle) {
-        title = webTitle;
-        logger.info(MODULE, `SKU=${sku}: using web title "${title}"`);
-      }
-    }
+    // 3. Get the title from the 'name' field (product.template)
+    const title = getProductTitle(odooProduct);
 
     // 4. Delete existing product in Sellibri (if any)
     const catalog = await sellibri.getCatalog();
