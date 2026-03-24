@@ -438,8 +438,9 @@ export async function fetchActiveCategories(): Promise<{ id: number; name: strin
 export async function fetchTemplateName(productTmplId: number): Promise<string | null> {
   try {
     const result = await execute('product.template', 'read', [[productTmplId]], {
-      fields: ['name'],
+            fields: ['name', 'display_name'],
     });
+        logger.info(MODULE, `fetchTemplateName(${productTmplId}): name="${result[0].name}", display_name="${result[0].display_name}"`);
     if (result && result.length > 0 && result[0].name) {
       return result[0].name;
     }
