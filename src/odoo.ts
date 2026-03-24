@@ -438,13 +438,15 @@ export async function fetchActiveCategories(): Promise<{ id: number; name: strin
 export async function fetchTemplateName(productTmplId: number): Promise<string | null> {
   try {
     const result = await execute('product.template', 'read', [[productTmplId]], {
-                  fields: ['name'],
+                            fields: ['name', 'seo_name'],
               });
-    if (result && result.length > 0) {
-        logger.info(MODULE, `fetchTemplateName(${productTmplId}): name="${result[0].name}"`);
-            if (result[0].name) return result[0].name;
-          }
-    return null;
+        if (result && result.length > 0) {
+      const tmpl = result[0];
+      logger.info(MODULE, `fetchTemplateName(${productTmplId}): name="${tmpl.name}", seo_name="${tmpl.seo_name}"`);
+      // Prefer seo_name (correct for duplicated products) over name
+      if (tmpl.seo_name) return tmpl.seo_name;
+      if (tmpl.name) return tmpl.name;
+    }return null;
      } catch (err: any) {
     logger.warn(MODULE, `Failed to fetch template name for tmpl_id=${productTmplId}: ${err.message}`);
     return null;
