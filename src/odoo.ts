@@ -432,6 +432,23 @@ export async function fetchActiveCategories(): Promise<{ id: number; name: strin
 
   return (cats as { id: number; name: string }[]).filter(c => usedIds.has(c.id));
 }
+/** Fetch the real name from product.template for a given product.
+ * This handles the case where duplicated products keep the old variant name
+ * but the template has the correct name. */
+export async function fetchTemplateName(productTmplId: number): Promise<string | null> {
+  try {
+    const result = await execute('product.template', 'read', [[productTmplId]], {
+      fields: ['name'],
+    });
+    if (result && result.length > 0 && result[0].name) {
+      return result[0].name;
+    }
+    return null;
+  } catch (err: any) {
+    logger.warn(MODULE, `Failed to fetch template name for tmpl_id=${productTmplId}: ${err.message}`);
+    return null;
+  }
+}
 
 export async function createSaleOrder(partnerId: number, lines: { product_id: number; product_uom_qty: number; price_unit: number }[]): Promise<number> {
   const orderLines = lines.map(l => [0, 0, {
