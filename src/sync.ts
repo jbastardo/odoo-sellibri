@@ -405,27 +405,8 @@ export async function syncMirror(): Promise<MirrorSyncResult> {
     };
 
     logger.info(MODULE, 'Mirror sync: loading Odoo products...');
-    const odooProductsRaw = await odoo.fetchAllProducts(); // ALL active products (no write_date filter)
-
-    // ── Deduplicate by SKU ──
-    // product.product may return multiple variants with the same default_code.
-    // We keep only the first variant per SKU to avoid creating duplicates in Sellibri.
-    const odooSkuSet = new Set<string>();
-    const odooProducts: odoo.OdooProduct[] = [];
-    let skippedDuplicates = 0;
-    for (const p of odooProductsRaw) {
-      if (!p.default_code) continue;
-      if (odooSkuSet.has(p.default_code)) {
-        skippedDuplicates++;
-        continue;
-      }
-      odooSkuSet.add(p.default_code);
-      odooProducts.push(p);
-    }
+    const odooProducts = await odoo.fetchAllProducts(); // ALL active products (no write_date filter)
     result.odooTotal = odooProducts.length;
-    if (skippedDuplicates > 0) {
-      logger.warn(MODULE, `Deduplicated: ${skippedDuplicates} duplicate SKUs removed (${odooProductsRaw.length} raw → ${odooProducts.length} unique)`);
-    }
 
     // Build dynamic category mapping (Odoo categories → Sellibri taxons)
     logger.info(MODULE, 'Mirror sync: building category map...');
@@ -436,7 +417,13 @@ export async function syncMirror(): Promise<MirrorSyncResult> {
     const sellibriCatalog = await sellibri.getCatalog(true); // force reload for accuracy
     result.sellibriTotal = sellibriCatalog.size;
 
-    logger.info(MODULE, `Mirror sync: Odoo=${odooProducts.length} unique SKUs, Sellibri=${sellibriCatalog.size}`);
+    // Build Odoo SKU set for later deletion check
+    const odooSkuSet = new Set<string>();
+    for (const p of odooProducts) {
+      if (p.default_code) odooSkuSet.add(p.default_code);
+    }
+
+    logger.info(MODULE, `Mirror sync: Odoo=${odooProducts.length} products (${odooSkuSet.size} unique SKUs), Sellibri=${sellibriCatalog.size}`);
 
     // ── Phase 2: Create or Update ──
     const totalWork = odooProducts.length;
