@@ -432,26 +432,35 @@ export async function fetchActiveCategories(): Promise<{ id: number; name: strin
 
   return (cats as { id: number; name: string }[]).filter(c => usedIds.has(c.id));
 }
-/** Fetch the real name from product.template for a given product.
- * This handles the case where duplicated products keep the old variant name
- * but the template has the correct name. */
+
+
+    /** Fetch the real name from product.template for a given product.
+ * Uses seo_name + model_of_product to build the correct title
+ * as displayed on the Odoo website: [MODEL] seo_name */
 export async function fetchTemplateName(productTmplId: number): Promise<string | null> {
   try {
     const result = await execute('product.template', 'read', [[productTmplId]], {
-                            fields: ['name', 'seo_name'],
-              });
-        if (result && result.length > 0) {
+                          fields: ['name', 'seo_name', 'model_of_product'],
+                        });
+    if (result && result.length > 0) {
       const tmpl = result[0];
-      logger.info(MODULE, `fetchTemplateName(${productTmplId}): name="${tmpl.name}", seo_name="${tmpl.seo_name}"`);
-      // Prefer seo_name (correct for duplicated products) over name
-      if (tmpl.seo_name) return tmpl.seo_name;
-      if (tmpl.name) return tmpl.name;
-    }return null;
-     } catch (err: any) {
+      const model = tmpl.model_of_product || '';
+      const seoName = tmpl.seo_name || '';
+      const name = tmpl.name || '';
+      logger.info(MODULE, `fetchTemplateName(${productTmplId}): name="${name}", seo_name="${seoName}", model="${model}"`);
+      // Build title: [MODEL] seo_name (matching Odoo website format)
+      if (seoName && model) {
+        return `[${model}] ${seoName}`;
+      }
+      if (seoName) return seoName;
+      if (name) return name;
+    }
+    return null;
+  } catch (err: any) {
     logger.warn(MODULE, `Failed to fetch template name for tmpl_id=${productTmplId}: ${err.message}`);
     return null;
   }
-
+}
 /** Fetch website_description from product.template */
 export async function fetchTemplateDescription(productTmplId: number): Promise<string | null> {
   try {
