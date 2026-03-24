@@ -143,12 +143,21 @@ async function getProductTitle(product: odoo.OdooProduct): Promise<string> {
   return cleanName(product.name);
 }
 
-function getDescription(product: odoo.OdooProduct): string {
-  const raw = product.website_description || product.description_sale || '';
+async function getDescription(product: odoo.OdooProduct): Promise<string> {
+  // Try to get website_description from template first (correct for duplicated products)
+  let raw = '';
+  if (product.product_tmpl_id && Array.isArray(product.product_tmpl_id)) {
+    const tmplDesc = await odoo.fetchTemplateDescription(product.product_tmpl_id[0]);
+    if (tmplDesc) raw = tmplDesc;
+  }
+  // Fallback to product fields
+  if (!raw) {
+    raw = product.website_description || product.description_sale || '';
+  }
   if (typeof raw !== 'string') return '';
-  return raw.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+  // Preserve HTML formatting from Odoo website
+  return raw.trim();
 }
-
 function getSellibriPrice(product: odoo.OdooProduct): string {
   const pwt = product.price_with_tax;
   if (pwt && pwt > 0) return pwt.toFixed(2);
@@ -196,7 +205,7 @@ async function buildFullPayload(
   includeImages: boolean = true,
 ): Promise<sellibri.SellibriProductPayload> {
   const price = getSellibriPrice(odooProduct);
-  const description = getDescription(odooProduct);
+    const description = await getDescription(odooProduct);
   const categId = Array.isArray(odooProduct.categ_id) ? odooProduct.categ_id[0] : 0;
   const taxonId = mapCategory(categId);
   const vendorId = mapBrandToVendor(odooProduct.brand_id);
@@ -250,7 +259,7 @@ async function buildDiffPayload(
   const odooPrice = getSellibriPrice(odooProduct);
   const odooStock = Math.max(0, Math.floor(odooProduct.qty_available || 0));
   const odooTitle = await getProductTitle(odooProduct);
-  const odooDescription = getDescription(odooProduct);
+    const odooDescription = await getDescription(odooProduct);
   const categId = Array.isArray(odooProduct.categ_id) ? odooProduct.categ_id[0] : 0;
   const taxonId = mapCategory(categId);
   const vendorId = mapBrandToVendor(odooProduct.brand_id);
