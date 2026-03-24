@@ -4,7 +4,7 @@ import * as path from 'path';
 import { config } from './config';
 import { logger } from './logger';
 import { syncMirror, syncPriceStock, syncSingleSku, getSyncStatus, requestAbort, resetSyncState } from './sync';
-import { fetchExcludedProducts } from './odoo';
+import { fetchExcludedProducts, diagnoseSku } from './odoo';
 import { handleOrderWebhook, getRecentOrders } from './webhook';
 
 const app = express();
@@ -129,6 +129,21 @@ app.get('/api/diagnostic/excluded', async (_req, res) => {
       excluded_count: result.excluded.length,
       excluded: result.excluded,
     });
+  } catch (err: any) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// ── Diagnose SKU (all fields) ──
+app.get('/api/diag/:sku', async (req, res) => {
+  const { sku } = req.params;
+  try {
+    const result = await diagnoseSku(sku.trim());
+    if (!result) {
+      res.status(404).json({ success: false, message: `SKU ${sku} not found in Odoo` });
+      return;
+    }
+    res.json({ success: true, ...result });
   } catch (err: any) {
     res.status(500).json({ success: false, message: err.message });
   }
