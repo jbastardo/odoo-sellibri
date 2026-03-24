@@ -1,369 +1,337 @@
-import axios, { AxiosInstance, AxiosError } from 'axios';
+import * as fs from 'fs';
+import * as path from 'path';
+import * as odoo from './odoo';
+import * as sellibri from './sellibri';
 import { config } from './config';
+import { mapCategory, buildCategoryMap } from './category-map';
+import { mapBrandToVendor } from './brand-map';
 import { logger } from './logger';
 
-const MODULE = 'sellibri';
+const MODULE = 'sync';
+const STATE_FILE = path.join(process.cwd(), 'sync-state.json');
 
-// ─── Adaptive Rate Limiter ─────────────────────────────────────
-// Aggressive: 3 req/sec steady, global cooldown on 429
+// ═══════════════════════════════════════════════════════════════
+// ARCHITECTURE: Odoo es MASTER — Sellibri es ESPEJO
+// ═══════════════════════════════════════════════════════════════
+//
+// Principios:
+// 1. Todo lo que está en Odoo (activo, vendible, con SKU) DEBE estar en Sellibri
+// 2. Todo campo se sobreescribe con el valor de Odoo (título, descripción,
+//    precio, stock, categoría, marca, imágenes, peso)
+// 3. Productos archivados/inactivos en Odoo → se eliminan de Sellibri
+// 4. Productos en Sellibri sin SKU en Odoo → se eliminan de Sellibri
+// 5. SKU (default_code en Odoo) = factor comparativo
+//
+// Flujos:
+// - Sync Espejo (cron 1h + botón): comparación completa Odoo vs Sellibri
+// - Actualizar SKU (botón): overwrite completo de un solo producto
+// - Precio/Stock (cron 15min + botón): solo precio y stock rápido
+// ═══════════════════════════════════════════════════════════════
 
-class AdaptiveRateLimiter {
-  private lastRequestTime = 0;
-  private minInterval = 350; // 350ms = ~2.8 req/sec (under 4/sec limit with margin)
-  private cooldownUntil = 0;
-  private consecutiveSuccesses = 0;
+interface ProductSyncEntry {
+  sellibriId: number;
+  sellibriVariantId: number;
+  odooWriteDate: string;
+  lastSynced: string;
+  lastStock?: number;
+  lastPrice?: string;
+}
 
-  async waitForSlot(): Promise<void> {
-    const now = Date.now();
-    if (this.cooldownUntil > now) {
-      const waitMs = this.cooldownUntil - now;
-      logger.warn(MODULE, `Cooldown active, waiting ${Math.round(waitMs / 1000)}s`);
-      await this.delay(waitMs);
+interface SyncState {
+  lastMirrorSync: string | null;
+  lastStockSync: string | null;
+  products: Record<string, ProductSyncEntry>;
+}
+
+function loadState(): SyncState {
+  try {
+    if (fs.existsSync(STATE_FILE)) {
+      const raw = JSON.parse(fs.readFileSync(STATE_FILE, 'utf-8'));
+      return {
+        lastMirrorSync: raw.lastMirrorSync || raw.lastProductSync || null,
+        lastStockSync: raw.lastStockSync || null,
+        products: raw.products || {},
+      };
     }
+  } catch (err: any) {
+    logger.warn(MODULE, `Could not load sync state: ${err.message}`);
+  }
+  return { lastMirrorSync: null, lastStockSync: null, products: {} };
+}
 
-    const elapsed = Date.now() - this.lastRequestTime;
-    if (elapsed < this.minInterval) {
-      await this.delay(this.minInterval - elapsed);
+function saveState(state: SyncState): void {
+  try {
+    fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
+  } catch (err: any) {
+    logger.error(MODULE, `Could not save sync state: ${err.message}`);
+  }
+}
+
+// ─── Sync Progress & Status ───────────────────────────────────────────
+
+export interface SyncProgress {
+  current: number;
+  total: number;
+  phase: string;
+  startedAt: string | null;
+  estimatedSecondsLeft: number | null;
+}
+
+export interface SyncStatus {
+  lastMirrorSync: string | null;
+  lastStockSync: string | null;
+  productsSynced: number;
+  isRunning: boolean;
+  lastError: string | null;
+  progress: SyncProgress | null;
+}
+
+let syncStatus: SyncStatus = {
+  lastMirrorSync: null,
+  lastStockSync: null,
+  productsSynced: 0,
+  isRunning: false,
+  lastError: null,
+  progress: null,
+};
+
+let mirrorSyncRunning = false;
+let stockSyncRunning = false;
+let abortRequested = false;
+
+export function getSyncStatus(): SyncStatus {
+  return { ...syncStatus };
+}
+
+export function requestAbort(): boolean {
+  if (!syncStatus.isRunning) return false;
+  abortRequested = true;
+  logger.warn(MODULE, 'Abort requested — sync will stop after current product');
+  return true;
+}
+
+export function resetSyncState(): void {
+  try {
+    if (fs.existsSync(STATE_FILE)) {
+      fs.unlinkSync(STATE_FILE);
     }
-
-    this.lastRequestTime = Date.now();
-  }
-
-  reportSuccess(): void {
-    this.consecutiveSuccesses++;
-    // Speed up after 50 consecutive successes (reduce to 300ms)
-    if (this.consecutiveSuccesses > 50 && this.minInterval > 300) {
-      this.minInterval = 300;
-    }
-  }
-
-  triggerCooldown(durationMs: number): void {
-    this.consecutiveSuccesses = 0;
-    this.minInterval = 500; // Slow down after a 429
-    const newCooldown = Date.now() + durationMs;
-    if (newCooldown > this.cooldownUntil) {
-      this.cooldownUntil = newCooldown;
-      logger.warn(MODULE, `429 — cooldown ${Math.round(durationMs / 1000)}s`);
-    }
-  }
-
-  private delay(ms: number): Promise<void> {
-    return new Promise(resolve => setTimeout(resolve, ms));
+    syncStatus.productsSynced = 0;
+    syncStatus.lastMirrorSync = null;
+    syncStatus.lastStockSync = null;
+    sellibri.invalidateCatalog();
+    logger.warn(MODULE, 'Sync state cleared — next sync will start from scratch');
+  } catch (err: any) {
+    logger.error(MODULE, `Could not clear sync state: ${err.message}`);
   }
 }
 
-const rateLimiter = new AdaptiveRateLimiter();
+// ─── Helpers ───────────────────────────────────────────────
 
-const client: AxiosInstance = axios.create({
-  baseURL: config.sellibri.baseUrl,
-  headers: {
-    'X-Api-Key': config.sellibri.apiKey,
-    'Content-Type': 'application/json',
-  },
-  timeout: 30_000,
-  maxBodyLength: Infinity,
-  maxContentLength: Infinity,
-});
+/**
+ * Remove Odoo's copy/duplicate markers AND trailing variant attribute suffixes
+ * from a product name.
+ * Examples:
+ *   "Cable UTP (copia)"      → "Cable UTP"
+ *   "Cable UTP (Azul)"       → "Cable UTP" (only if it's the last parenthesized group)
+ *   "[XTA150] Xtech - Base (copiar 2)" → "[XTA150] Xtech - Base"
+ */
+function cleanName(name: string): string {
+  if (!name) return name;
+  let cleaned = name
+    // Remove (copia), (copiar), (copiar 2), (copy), (copy 3), etc.
+    .replace(/\s*\(copia[r]?(\s*\d*)?\)/gi, '')
+    .replace(/\s*\(copy(\s*\d*)?\)/gi, '')
+    .trim();
+  return cleaned;
+}
 
-/** Retry wrapper with adaptive backoff on 429 */
-async function withRetry<T>(fn: () => Promise<T>, maxRetries = 3): Promise<T> {
-  for (let attempt = 0; attempt <= maxRetries; attempt++) {
-    try {
-      const result = await fn();
-      rateLimiter.reportSuccess();
-      return result;
-    } catch (err: any) {
-      const status = (err as AxiosError)?.response?.status;
-      if (status === 429 && attempt < maxRetries) {
-        const waitMs = Math.pow(2, attempt) * 30_000; // 30s, 60s, 120s
-        rateLimiter.triggerCooldown(waitMs);
-        await new Promise(resolve => setTimeout(resolve, waitMs));
-        continue;
-      }
-      throw err;
-    }
+/**
+ * Get the CORRECT title for a product.
+ * 
+ * Strategy: Try product.template name first (handles most cases correctly).
+ * If template name matches another product's name (variant confusion),
+ * fall back to product.product.name.
+ * 
+ * Both sources get cleaned of (copia)/(copy) markers.
+ */
+async function getProductTitle(product: odoo.OdooProduct): Promise<string> {
+  // Primary: read from product.template — this is what Odoo's UI shows
+  if (product.product_tmpl_id && Array.isArray(product.product_tmpl_id)) {
+    const tmplName = await odoo.fetchTemplateName(product.product_tmpl_id[0]);
+    if (tmplName) return cleanName(tmplName);
   }
-  throw new Error('Max retries exceeded');
+  // Fallback: product.product.name (may have variant suffix)
+  return cleanName(product.name);
 }
 
-async function apiGet<T = any>(path: string, params?: Record<string, any>): Promise<T> {
-  return withRetry(async () => {
-    await rateLimiter.waitForSlot();
-    const resp = await client.get(path, { params });
-    return resp.data;
-  });
+/**
+ * Extract a clean text description from Odoo's HTML or plain text fields.
+ * Strips HTML tags for a clean Sellibri description.
+ */
+function getDescription(product: odoo.OdooProduct): string {
+  const raw = product.website_description || product.description_sale || '';
+  if (typeof raw !== 'string') return '';
+  // Strip HTML tags if present, keep text content
+  return raw.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
 }
 
-async function apiPost<T = any>(path: string, data: any): Promise<T> {
-  return withRetry(async () => {
-    await rateLimiter.waitForSlot();
-    const resp = await client.post(path, data);
-    return resp.data;
-  });
+function getSellibriPrice(product: odoo.OdooProduct): string {
+  const pwt = product.price_with_tax;
+  if (pwt && pwt > 0) return pwt.toFixed(2);
+  return (product.list_price * (1 + config.ivaRate)).toFixed(2);
 }
 
-async function apiPatch<T = any>(path: string, data: any): Promise<T> {
-  return withRetry(async () => {
-    await rateLimiter.waitForSlot();
-    const resp = await client.patch(path, data);
-    return resp.data;
-  });
-}
-
-async function apiDelete<T = any>(path: string): Promise<T> {
-  return withRetry(async () => {
-    await rateLimiter.waitForSlot();
-    const resp = await client.delete(path);
-    return resp.data;
-  });
-}
-
-// ─── Interfaces ────────────────────────────────────────────────
-
-export interface SellibriImageAttribute {
-  remote_url?: string;
-  base64_data?: string;
-  position?: number;
-  alt?: string;
-}
-
-export interface SellibriMasterAttributes {
-  sku?: string;
-  price?: string;
-  barcode?: string;
-  weight?: number;
-  width?: number | null;
-  height?: number | null;
-  length?: number | null;
-  track_inventory?: boolean;
-  tax_rate_id?: number;
-  stock_items_attributes?: { stock_location_id: number; available: number }[];
-  images_attributes?: SellibriImageAttribute[];
-}
-
-export interface SellibriProductPayload {
-  product: {
-    title?: string;
-    slug?: string;
-    status?: string;
-    description?: string;
-    product_vendor_id?: number | null;
-    taxon_ids?: number[];
-    master_attributes?: SellibriMasterAttributes;
+function updateProgress(done: number, total: number, batchStartTime: number, prefix = 'Sincronizando'): void {
+  const elapsed = (Date.now() - batchStartTime) / 1000;
+  const rate = done > 0 ? elapsed / done : 1;
+  const remaining = Math.max(0, total - done);
+  syncStatus.progress = {
+    current: done,
+    total,
+    phase: `${prefix} ${done} / ${total}...`,
+    startedAt: syncStatus.progress?.startedAt || new Date().toISOString(),
+    estimatedSecondsLeft: Math.round(remaining * rate),
   };
 }
 
-export interface SellibriVariantDetail {
-  id: number;
-  sku: string;
-  price: string;
-  barcode: string | null;
-  weight: string | null;
-  width: string | null;
-  height: string | null;
-  length: string | null;
-  images: { id: number; url: string }[];
-  stock_items: { id: number; stock_location_id: number; available: number }[];
+/** Validate minimum required data for Sellibri */
+function isValidForSellibri(product: odoo.OdooProduct): boolean {
+  if (!product.name || product.name.trim() === '') return false;
+  const price = parseFloat(getSellibriPrice(product));
+  if (isNaN(price) || price <= 0) return false;
+  return true;
 }
 
-export interface SellibriProduct {
-  id: number;
-  title: string;
-  slug: string;
-  status: string;
-  description: string | null;
-  product_vendor_id: number | null;
-  all_variants: SellibriVariantDetail[];
-  taxon_ids?: number[];
-}
+// ─── Image Builder ─────────────────────────────────────────────────
 
-// ─── In-Memory Catalog Cache ───────────────────────────────────
-// Loaded once at startup / first sync, then kept in memory.
-// Updated incrementally when products are created/updated.
-// Eliminates the need to re-fetch 110 pages for every operation.
-
-let catalogCache: Map<string, SellibriProduct> | null = null;
-let catalogLoadedAt: number = 0;
-const CATALOG_MAX_AGE_MS = 30 * 60 * 1000; // 30 minutes
-
-/** Get the in-memory catalog. Loads from API if not cached or expired. */
-export async function getCatalog(forceReload = false): Promise<Map<string, SellibriProduct>> {
-  const age = Date.now() - catalogLoadedAt;
-  if (!catalogCache || forceReload || age > CATALOG_MAX_AGE_MS) {
-    catalogCache = await fetchAllProductsFromApi();
-    catalogLoadedAt = Date.now();
+function buildImagesPayload(odooProduct: odoo.OdooProduct, title: string): sellibri.SellibriImageAttribute[] {
+  const imageUrls = odoo.buildImageUrls(odooProduct);
+  const attrs: sellibri.SellibriImageAttribute[] = [];
+  if (imageUrls.mainUrl) {
+    attrs.push({ remote_url: imageUrls.mainUrl, position: 1, alt: title });
   }
-  return catalogCache;
-}
-
-/** Invalidate the cache (e.g. after reset) */
-export function invalidateCatalog(): void {
-  catalogCache = null;
-  catalogLoadedAt = 0;
-}
-
-/** Update the in-memory catalog entry for a SKU (after create/update) */
-function updateCatalogEntry(sku: string, product: SellibriProduct): void {
-  if (catalogCache) {
-    catalogCache.set(sku, product);
+  for (const extra of imageUrls.additionalUrls) {
+    attrs.push({ remote_url: extra.url, position: extra.position, alt: title });
   }
+  return attrs;
 }
 
-/** Remove a SKU from the in-memory catalog (after delete) */
-function removeCatalogEntry(sku: string): void {
-  if (catalogCache) {
-    catalogCache.delete(sku);
-  }
-}
+// ─── Payload Builder: FULL OVERWRITE ─────────────────────────────
 
-// ─── Catalog Loading (internal) ────────────────────────────────
+async function buildFullPayload(
+  odooProduct: odoo.OdooProduct,
+  includeImages: boolean = true,
+): Promise<sellibri.SellibriProductPayload> {
+  const price = getSellibriPrice(odooProduct);
+  const description = getDescription(odooProduct);
+  const categId = Array.isArray(odooProduct.categ_id) ? odooProduct.categ_id[0] : 0;
+  const taxonId = mapCategory(categId);
+  const vendorId = mapBrandToVendor(odooProduct.brand_id);
+  const title = await getProductTitle(odooProduct);
 
-// Products to clean up, detected during catalog load:
-// - Duplicates: same SKU, different product IDs
-// - No-SKU: products without any SKU (junk/legacy data)
-let duplicateProducts: { sku: string; id: number }[] = [];
-let noSkuProducts: number[] = []; // product IDs without SKU
+  const masterAttrs: sellibri.SellibriMasterAttributes = {
+    sku: odooProduct.default_code,
+    price,
+    barcode: odooProduct.barcode || undefined,
+    weight: odooProduct.weight || undefined,
+    width: null,
+    height: null,
+    length: null,
+    track_inventory: true,
+    tax_rate_id: config.sellibri.taxRateId,
+    stock_items_attributes: [{
+      stock_location_id: config.sellibri.stockLocationId,
+      available: Math.max(0, Math.floor(odooProduct.qty_available || 0)),
+    }],
+  };
 
-export function getDuplicates(): { sku: string; id: number }[] {
-  return duplicateProducts;
-}
-
-export function getNoSkuProducts(): number[] {
-  return noSkuProducts;
-}
-
-export function clearCleanupLists(): void {
-  duplicateProducts = [];
-  noSkuProducts = [];
-}
-
-async function fetchAllProductsFromApi(): Promise<Map<string, SellibriProduct>> {
-  const map = new Map<string, SellibriProduct>();
-  duplicateProducts = [];
-  noSkuProducts = [];
-  let page = 1;
-  const perPage = 50;
-  let consecutiveErrors = 0;
-
-  while (true) {
-    try {
-      const data = await apiGet('/products', { per_page: perPage, page });
-      const products: SellibriProduct[] = data.products || [];
-      if (products.length === 0) break;
-
-      consecutiveErrors = 0;
-
-      for (const p of products) {
-        let productHasSku = false;
-        for (const v of p.all_variants || []) {
-          if (v.sku && v.sku.trim()) {
-            productHasSku = true;
-            const existing = map.get(v.sku);
-            if (existing && existing.id !== p.id) {
-              duplicateProducts.push({ sku: v.sku, id: p.id });
-            } else {
-              map.set(v.sku, p);
-            }
-          }
-        }
-        if (!productHasSku) {
-          noSkuProducts.push(p.id);
-        }
-      }
-
-      if (page % 20 === 0 || products.length < perPage) {
-        logger.info(MODULE, `Catalog page ${page} (${map.size} SKUs)`);
-      }
-      if (products.length < perPage) break;
-    } catch (err: any) {
-      const status = (err as AxiosError)?.response?.status;
-      consecutiveErrors++;
-      logger.warn(MODULE, `Catalog page ${page} error (HTTP ${status || '?'}): ${err.message} [${consecutiveErrors}/5]`);
-      if (consecutiveErrors >= 5) {
-        logger.error(MODULE, `Too many consecutive errors, stopping at page ${page}`);
-        break;
-      }
+  if (includeImages) {
+    const imagesAttrs = buildImagesPayload(odooProduct, title);
+    if (imagesAttrs.length > 0) {
+      masterAttrs.images_attributes = imagesAttrs;
     }
-    page++;
   }
 
-  if (duplicateProducts.length > 0) {
-    logger.warn(MODULE, `Found ${duplicateProducts.length} duplicate SKUs — will be deleted`);
-  }
-  if (noSkuProducts.length > 0) {
-    logger.warn(MODULE, `Found ${noSkuProducts.length} products without SKU — will be deleted`);
-  }
-  logger.info(MODULE, `Sellibri catalog loaded: ${page} pages, ${map.size} SKUs, ${noSkuProducts.length} without SKU`);
-  return map;
+  return {
+    product: {
+      title,
+      slug: odooProduct.default_code,
+      status: 'active',
+      description,
+      ...(vendorId ? { product_vendor_id: vendorId } : {}),
+      master_attributes: masterAttrs,
+      taxon_ids: [taxonId],
+    },
+  };
 }
 
-/** Public alias — always uses the cache */
-export async function fetchAllProducts(): Promise<Map<string, SellibriProduct>> {
-  return getCatalog();
-}
+// ─── Smart Diff ────────────────────────────────────────────────────
 
-/** Fetch a single Sellibri product by its ID */
-export async function fetchProductById(id: number): Promise<SellibriProduct | null> {
-  try {
-    const data = await apiGet(`/products/${id}`);
-    return data.product || data || null;
-  } catch (err: any) {
-    if ((err as AxiosError)?.response?.status === 404) return null;
-    throw err;
+async function buildDiffPayload(
+  odooProduct: odoo.OdooProduct,
+  sp: sellibri.SellibriProduct,
+): Promise<sellibri.SellibriProductPayload | null> {
+  const variant = sp.all_variants?.[0];
+  if (!variant) return await buildFullPayload(odooProduct, false);
+
+  const odooPrice = getSellibriPrice(odooProduct);
+  const odooStock = Math.max(0, Math.floor(odooProduct.qty_available || 0));
+  const odooTitle = await getProductTitle(odooProduct);
+  const odooDescription = getDescription(odooProduct);
+  const categId = Array.isArray(odooProduct.categ_id) ? odooProduct.categ_id[0] : 0;
+  const taxonId = mapCategory(categId);
+  const vendorId = mapBrandToVendor(odooProduct.brand_id);
+
+  let needsUpdate = false;
+  const productFields: Record<string, any> = {};
+  const masterAttrs: sellibri.SellibriMasterAttributes = {
+    sku: odooProduct.default_code,
+    track_inventory: true,
+    tax_rate_id: config.sellibri.taxRateId,
+  };
+
+  // Status
+  if (sp.status !== 'active') { needsUpdate = true; }
+
+  // Title
+  if ((sp.title || '') !== odooTitle) {
+    productFields.title = odooTitle;
+    needsUpdate = true;
   }
-}
 
-// ─── CRUD ──────────────────────────────────────────────────────
-
-export async function createProduct(payload: SellibriProductPayload): Promise<SellibriProduct> {
-  const data = await apiPost('/products', payload);
-  const product = data.product || data;
-  // Update in-memory catalog
-  const sku = payload.product?.master_attributes?.sku;
-  if (sku && product) {
-    updateCatalogEntry(sku, product);
+  // Description — compare and sync
+  const currentDescription = sp.description || '';
+  if (odooDescription && currentDescription !== odooDescription) {
+    productFields.description = odooDescription;
+    needsUpdate = true;
   }
-  return product;
-}
 
-export async function updateProduct(id: number, payload: SellibriProductPayload): Promise<SellibriProduct> {
-  const data = await apiPatch(`/products/${id}`, payload);
-  const product = data.product || data;
-  // Update in-memory catalog
-  const sku = payload.product?.master_attributes?.sku || product?.all_variants?.[0]?.sku;
-  if (sku && product) {
-    updateCatalogEntry(sku, product);
+  // Price
+  const currentPrice = parseFloat(variant.price || '0');
+  const newPrice = parseFloat(odooPrice);
+  if (Math.abs(currentPrice - newPrice) > 0.01) {
+    masterAttrs.price = odooPrice;
+    needsUpdate = true;
   }
-  return product;
-}
 
-/** Delete a product from Sellibri by its ID */
-export async function deleteProduct(id: number, sku?: string): Promise<boolean> {
-  try {
-    await apiDelete(`/products/${id}`);
-    if (sku) removeCatalogEntry(sku);
-    logger.info(MODULE, `Deleted product id=${id}`);
-    return true;
-  } catch (err: any) {
-    const status = (err as AxiosError)?.response?.status;
-    if (status === 404) {
-      if (sku) removeCatalogEntry(sku);
-      return true;
-    }
-    logger.error(MODULE, `Failed to delete product id=${id}: ${err.message}`);
-    return false;
+  // Stock
+  const currentStock = variant.stock_items?.[0]?.available ?? 0;
+  if (currentStock !== odooStock) {
+    masterAttrs.stock_items_attributes = [{
+      stock_location_id: config.sellibri.stockLocationId,
+      available: odooStock,
+    }];
+    needsUpdate = true;
   }
-}
 
-/** Deactivate a product in Sellibri (set status='draft') */
-export async function deactivateProduct(id: number): Promise<boolean> {
-  try {
-    await apiPatch(`/products/${id}`, {
-      product: { title: '', status: 'draft' },
-    });
-    return true;
-  } catch (err: any) {
-    logger.error(MODULE, `Failed to deactivate product id=${id}: ${err.message}`);
-    return false;
+  // Category (taxon_ids) — always compare and update
+  const currentTaxons = sp.taxon_ids || [];
+  if (!currentTaxons.includes(taxonId)) {
+    productFields.taxon_ids = [taxonId];
+    needsUpdate = true;
   }
-}
+
+  // Vendor (brand)
+  if (vendorId && sp.product_vendor_id !== vendorId) {
+    productFields.product_vendor_id = vendorId;
+    needsUpdate = true;
