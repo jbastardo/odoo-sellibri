@@ -161,24 +161,24 @@ cron.schedule('*/15 * * * *', () => {
   });
 });
 
-// Cron 2: Sync Espejo cada 1 hora (crea faltantes, actualiza, elimina huérfanos)
-cron.schedule('0 * * * *', () => {
-  if (manualActionRunning) {
-    logger.info('cron', 'Cron espejo omitido — acción manual en curso');
-    return;
-  }
-  const status = getSyncStatus();
-  if (status.isRunning) {
-    logger.info('cron', 'Cron espejo omitido — sync en curso');
-    return;
-  }
-  logger.info('cron', 'Cron: sync espejo (crear/actualizar/eliminar)');
-  syncMirror().catch(err => {
-    logger.error('cron', `Cron espejo error: ${err.message}`);
-  });
-});
+// Cron 2: Sync Espejo DESACTIVADO — solo manual desde dashboard
+// cron.schedule('0 * * * *', () => {
+//   if (manualActionRunning) {
+//     logger.info('cron', 'Cron espejo omitido — acción manual en curso');
+//     return;
+//   }
+//   const status = getSyncStatus();
+//   if (status.isRunning) {
+//     logger.info('cron', 'Cron espejo omitido — sync en curso');
+//     return;
+//   }
+//   logger.info('cron', 'Cron: sync espejo (crear/actualizar/eliminar)');
+//   syncMirror().catch(err => {
+//     logger.error('cron', `Cron espejo error: ${err.message}`);
+//   });
+// });
 
-logger.info('server', 'Cron activo: precio/stock cada 15 min | espejo cada 1 hora');
+logger.info('server', 'Cron activo: precio/stock cada 15 min | espejo: solo manual');
 
 // === Start Server ===
 
