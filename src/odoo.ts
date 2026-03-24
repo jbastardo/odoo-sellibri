@@ -476,7 +476,6 @@ export async function fetchTemplateDescription(productTmplId: number): Promise<s
     return null;
   }
 }
-}
 
 export async function createSaleOrder(partnerId: number, lines: { product_id: number; product_uom_qty: number; price_unit: number }[]): Promise<number> {
   const orderLines = lines.map(l => [0, 0, {
