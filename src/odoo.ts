@@ -475,3 +475,33 @@ export async function createSaleOrder(partnerId: number, lines: { product_id: nu
 
   return orderId;
 }
+
+
+                                /** Diagnostic: fetch ALL fields for a product by SKU + its template */
+export async function diagnoseSku(sku: string): Promise<{ product: any; template: any } | null> {
+  const products = await execute('product.product', 'search_read', [
+    [['default_code', '=', sku]],
+  ], { limit: 1 });
+  if (!products || products.length === 0) return null;
+  const product = products[0];
+  let template: any = null;
+  if (product.product_tmpl_id && Array.isArray(product.product_tmpl_id)) {
+    const tmplId = product.product_tmpl_id[0];
+    const tmplResult = await execute('product.template', 'read', [[tmplId]], {});
+    if (tmplResult && tmplResult.length > 0) template = tmplResult[0];
+  }
+  // Remove heavy binary fields to avoid huge responses
+  if (product.image_1920) product.image_1920 = '(binary omitted)';
+  if (product.image_1024) product.image_1024 = '(binary omitted)';
+  if (product.image_512) product.image_512 = '(binary omitted)';
+  if (product.image_256) product.image_256 = '(binary omitted)';
+  if (product.image_128) product.image_128 = '(binary omitted)';
+  if (template) {
+    if (template.image_1920) template.image_1920 = '(binary omitted)';
+    if (template.image_1024) template.image_1024 = '(binary omitted)';
+    if (template.image_512) template.image_512 = '(binary omitted)';
+    if (template.image_256) template.image_256 = '(binary omitted)';
+    if (template.image_128) template.image_128 = '(binary omitted)';
+  }
+  return { product, template };
+}
