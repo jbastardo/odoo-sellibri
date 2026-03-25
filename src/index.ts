@@ -9,8 +9,9 @@ import { handleOrderWebhook, getRecentOrders } from './webhook';
 
 const app = express();
 
-// ─── Manual action lock ────────────────────────────────────────
+// --- Manual action lock ----------------------------------------
 let manualActionRunning = false;
+let apiEnabled = true;
 
 function startManualAction(name: string): boolean {
   const status = getSyncStatus();
@@ -18,13 +19,13 @@ function startManualAction(name: string): boolean {
     return false;
   }
   manualActionRunning = true;
-  logger.info('api', `Manual action started: ${name} — cron blocked until finished`);
+  logger.info('api', `Manual action started: ${name} -- cron blocked until finished`);
   return true;
 }
 
 function endManualAction(name: string): void {
   manualActionRunning = false;
-  logger.info('api', `Manual action finished: ${name} — cron unblocked`);
+  logger.info('api', `Manual action finished: ${name} -- cron unblocked`);
 }
 
 // Raw body capture for HMAC verification on webhook route
@@ -46,35 +47,43 @@ app.get('/api/status', (_req, res) => {
     sync: getSyncStatus(),
     recentOrders: getRecentOrders(),
     logs: logger.getLogs(100),
+    apiEnabled,
   });
 });
 
-// ── Sync Espejo: full mirror (create + update + delete) ──
+// --- Toggle API on/off ---
+app.post('/api/toggle', (_req, res) => {
+  apiEnabled = !apiEnabled;
+  logger.info('api', `API ${apiEnabled ? 'encendida' : 'apagada'} manualmente`);
+  res.json({ success: true, apiEnabled, message: apiEnabled ? 'API encendida' : 'API apagada' });
+});
+
+// --- Sync Espejo: full mirror (create + update + delete) ---
 app.post('/api/sync/mirror', async (_req, res) => {
   if (!startManualAction('Sync Espejo')) {
-    res.json({ message: 'Ya hay una sincronización en curso' });
+    res.json({ message: 'Ya hay una sincronizacion en curso' });
     return;
   }
-  res.json({ message: 'Sync espejo iniciada — comparando Odoo vs Sellibri...' });
+  res.json({ message: 'Sync espejo iniciada -- comparando Odoo vs Sellibri...' });
   syncMirror()
-    .then(r => logger.info('api', `Espejo: ${r.created} creados, ${r.updated} corregidos, ${r.unchanged} sin cambios, ${r.deleted} eliminados, ${r.skippedInvalid} inválidos, ${r.errors} errores`))
+    .then(r => logger.info('api', `Espejo: ${r.created} creados, ${r.updated} corregidos, ${r.unchanged} sin cambios, ${r.deleted} eliminados, ${r.skippedInvalid} invalidos, ${r.errors} errores`))
     .catch(err => logger.error('api', `Sync espejo error: ${err.message}`))
     .finally(() => endManualAction('Sync Espejo'));
 });
 
-// ── Precio/Stock manual ──
+// --- Precio/Stock manual ---
 app.post('/api/sync/stock', async (_req, res) => {
   if (!startManualAction('Precio/Stock')) {
-    res.json({ message: 'Ya hay una sincronización en curso' });
+    res.json({ message: 'Ya hay una sincronizacion en curso' });
     return;
   }
-  res.json({ message: 'Sincronización precio/stock iniciada' });
+  res.json({ message: 'Sincronizacion precio/stock iniciada' });
   syncPriceStock()
     .catch(err => logger.error('api', `Manual price/stock sync error: ${err.message}`))
     .finally(() => endManualAction('Precio/Stock'));
 });
 
-// ── Actualizar SKU (single product full overwrite) ──
+// --- Actualizar SKU (single product full overwrite) ---
 app.post('/api/sync/sku/:sku', async (req, res) => {
   const { sku } = req.params;
   if (!sku || sku.trim() === '') {
@@ -82,7 +91,7 @@ app.post('/api/sync/sku/:sku', async (req, res) => {
     return;
   }
   if (!startManualAction(`SKU ${sku.trim()}`)) {
-    res.json({ success: false, message: 'Ya hay una sincronización en curso' });
+    res.json({ success: false, message: 'Ya hay una sincronizacion en curso' });
     return;
   }
   try {
@@ -95,7 +104,7 @@ app.post('/api/sync/sku/:sku', async (req, res) => {
   }
 });
 
-// ── Abort ──
+// --- Abort ---
 app.post('/api/sync/abort', (_req, res) => {
   const aborted = requestAbort();
   if (aborted) {
@@ -103,22 +112,22 @@ app.post('/api/sync/abort', (_req, res) => {
   }
   res.json({
     success: aborted,
-    message: aborted ? 'Sincronización detenida' : 'No hay sincronización en curso',
+    message: aborted ? 'Sincronizacion detenida' : 'No hay sincronizacion en curso',
   });
 });
 
-// ── Reset state ──
+// --- Reset state ---
 app.post('/api/sync/reset', (_req, res) => {
   const status = getSyncStatus();
   if (status.isRunning || manualActionRunning) {
-    res.json({ success: false, message: 'No se puede resetear mientras hay una sincronización en curso' });
+    res.json({ success: false, message: 'No se puede resetear mientras hay una sincronizacion en curso' });
     return;
   }
   resetSyncState();
-  res.json({ success: true, message: 'Estado de sincronización eliminado. La próxima sync empezará desde cero.' });
+  res.json({ success: true, message: 'Estado de sincronizacion eliminado. La proxima sync empezara desde cero.' });
 });
 
-// ── Diagnostic ──
+// --- Diagnostic ---
 app.get('/api/diagnostic/excluded', async (_req, res) => {
   try {
     const result = await fetchExcludedProducts();
@@ -134,7 +143,7 @@ app.get('/api/diagnostic/excluded', async (_req, res) => {
   }
 });
 
-// ── Diagnose SKU (all fields) ──
+// --- Diagnose SKU (all fields) ---
 app.get('/api/diag/:sku', async (req, res) => {
   const { sku } = req.params;
   try {
@@ -161,13 +170,17 @@ app.get('/health', (_req, res) => {
 
 // Cron 1: Precio/Stock cada 15 min
 cron.schedule('*/15 * * * *', () => {
+  if (!apiEnabled) {
+    logger.info('cron', 'Cron precio/stock omitido -- API apagada');
+    return;
+  }
   if (manualActionRunning) {
-    logger.info('cron', 'Cron precio/stock omitido — acción manual en curso');
+    logger.info('cron', 'Cron precio/stock omitido -- accion manual en curso');
     return;
   }
   const status = getSyncStatus();
   if (status.isRunning) {
-    logger.info('cron', 'Cron precio/stock omitido — sync en curso');
+    logger.info('cron', 'Cron precio/stock omitido -- sync en curso');
     return;
   }
   logger.info('cron', 'Cron: sincronizando precio/stock');
@@ -176,15 +189,19 @@ cron.schedule('*/15 * * * *', () => {
   });
 });
 
-// Cron 2: Sync Espejo DESACTIVADO — solo manual desde dashboard
+// Cron 2: Sync Espejo DESACTIVADO -- solo manual desde dashboard
 // cron.schedule('0 * * * *', () => {
+//   if (!apiEnabled) {
+//     logger.info('cron', 'Cron espejo omitido -- API apagada');
+//     return;
+//   }
 //   if (manualActionRunning) {
-//     logger.info('cron', 'Cron espejo omitido — acción manual en curso');
+//     logger.info('cron', 'Cron espejo omitido -- accion manual en curso');
 //     return;
 //   }
 //   const status = getSyncStatus();
 //   if (status.isRunning) {
-//     logger.info('cron', 'Cron espejo omitido — sync en curso');
+//     logger.info('cron', 'Cron espejo omitido -- sync en curso');
 //     return;
 //   }
 //   logger.info('cron', 'Cron: sync espejo (crear/actualizar/eliminar)');
@@ -196,7 +213,6 @@ cron.schedule('*/15 * * * *', () => {
 logger.info('server', 'Cron activo: precio/stock cada 15 min | espejo: solo manual');
 
 // === Start Server ===
-
 app.listen(config.port, () => {
   logger.info('server', `Odoo-Sellibri integration running on port ${config.port}`);
   logger.info('server', `Dashboard: http://localhost:${config.port}`);
