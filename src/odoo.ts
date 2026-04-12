@@ -1,4 +1,5 @@
 import * as xmlrpc from 'xmlrpc';
+import axios from 'axios';
 import { config } from './config';
 import { logger } from './logger';
 
@@ -34,13 +35,23 @@ let cachedUid: number | null = null;
 async function authenticate(): Promise<number> {
   if (cachedUid) return cachedUid;
   const client = createClient('/xmlrpc/2/common');
+  
+  const authParams = {
+    db: config.odoo.db,
+    username: config.odoo.username,
+    apiKey: config.odoo.apiKey?.substring(0, 10) + '...',
+  };
+  logger.info(MODULE, `Authenticating to Odoo: ${JSON.stringify(authParams)}`);
+  
   const uid = await call(client, 'authenticate', [
     config.odoo.db,
     config.odoo.username,
     config.odoo.apiKey,
     {},
   ]);
-  if (!uid) throw new Error('Odoo authentication failed');
+  
+  logger.info(MODULE, `Auth raw response: ${JSON.stringify(uid)}`);
+  if (!uid || uid === false) throw new Error('Odoo authentication failed');
   cachedUid = uid as number;
   logger.info(MODULE, `Authenticated with UID: ${uid}`);
   return uid;
@@ -434,41 +445,106 @@ export async function fetchActiveCategories(): Promise<{ id: number; name: strin
 }
 
 
-    /** Fetch the real name from product.template for a given product.
- * Uses seo_name + model_of_product to build the correct title
- * as displayed on the Odoo website: [MODEL] seo_name */
-export async function fetchTemplateName(productTmplId: number): Promise<string | null> {
-  try {
-    const result = await execute('product.template', 'read', [[productTmplId]], {
-                          fields: ['name', 'seo_name', 'model_of_product'],
-                        });
-    if (result && result.length > 0) {
-      const tmpl = result[0];
-      const model = tmpl.model_of_product || '';
-      const seoName = tmpl.seo_name || '';
-      const name = tmpl.name || '';
-      logger.info(MODULE, `fetchTemplateName(${productTmplId}): name="${name}", seo_name="${seoName}", model="${model}"`);
-      // Build title: [MODEL] seo_name (matching Odoo website format)
-      if (seoName && model) {
-        return `[${model}] ${seoName}`;
+/** Fetch name from website as fallback for duplicated products */
+    async function fetchNameFromOdooWebsite(sku: string): Promise<string | null> {
+      try {
+        const searchUrl = `${config.odoo.url}/shop?search=${sku}`;
+        const resp = await axios.get(searchUrl, {
+          timeout: 15000,
+          maxRedirects: 10,
+          headers: { 'User-Agent': 'Mozilla/5.0' },
+        });
+        
+        const html = resp.data;
+        const allLinks = html.match(/href="(\/shop\/[^"#]+)"/g) || [];
+        
+        let productLink = null;
+        for (const link of allLinks) {
+          if (link.includes(sku)) {
+            productLink = link.replace('href="', '').replace('"', '');
+            break;
+          }
+        }
+        
+        if (!productLink) return null;
+        
+        productLink = productLink.split('?')[0];
+        const productUrl = `${config.odoo.url}${productLink}`;
+        
+        const productResp = await axios.get(productUrl, {
+          timeout: 15000,
+          maxRedirects: 10,
+          headers: { 'User-Agent': 'Mozilla/5.0' },
+        });
+        
+        const productHtml = productResp.data;
+        const metaTitleMatch = productHtml.match(/<meta[^>]*name=["']default_title["'][^>]*content=["']([^"']+)["']/i);
+        const ogTitleMatch = productHtml.match(/<meta[^>]*property=["']og:title["'][^>]*content=["']([^"']+)["']/i);
+        const name = metaTitleMatch?.[1] || ogTitleMatch?.[1];
+        return name?.replace(/\s*\|\s*onprotec\s*$/i, '').trim() || null;
+      } catch (err: any) {
+        logger.warn(MODULE, `fetchNameFromOdooWebsite error: ${err.message}`);
+        return null;
       }
-      if (seoName) return seoName;
-      if (name) return name;
     }
-    return null;
-  } catch (err: any) {
-    logger.warn(MODULE, `Failed to fetch template name for tmpl_id=${productTmplId}: ${err.message}`);
-    return null;
-  }
-}
-/** Fetch website_description from product.template */
+
+    /** Fetch the real name from product.template for a given product.
+     * Uses product_template.name as the primary source.
+     * Falls back to website if name has "(copiar)". */
+    export async function fetchTemplateName(productTmplId: number, fallbackSku?: string): Promise<string | null> {
+      try {
+        const result = await execute('product.template', 'read', [[productTmplId]], {
+          fields: ['name', 'display_name', 'default_code'],
+        });
+        if (result && result.length > 0) {
+          const tmpl = result[0];
+          let name = tmpl.name || '';
+          const displayName = tmpl.display_name || '';
+          const defaultCode = tmpl.default_code || fallbackSku || '';
+          
+          logger.info(MODULE, `fetchTemplateName(${productTmplId}): template_name="${name}", display_name="${displayName}"`);
+          
+          // Check for "(copiar)" in name - use website fallback
+          const hasCopiar = name.toLowerCase().includes('copiar') || 
+                          name.toLowerCase().includes('copy') ||
+                          displayName.toLowerCase().includes('copiar') || 
+                          displayName.toLowerCase().includes('copy');
+          
+          if (hasCopiar && defaultCode) {
+            // Fetch from website as fallback
+            logger.info(MODULE, `fetchTemplateName(${productTmplId}): name has "copiar", fetching from website...`);
+            const websiteName = await fetchNameFromOdooWebsite(defaultCode);
+            if (websiteName) {
+              logger.info(MODULE, `fetchTemplateName(${productTmplId}): using website name="${websiteName}"`);
+              return websiteName;
+            }
+          }
+          
+          // Use template.name if valid
+          if (name) {
+            return name.replace(/^copy\s+of\s+/i, '').trim();
+          }
+          if (displayName) {
+            return displayName.replace(/^copy\s+of\s+/i, '').trim();
+          }
+          if (defaultCode) return `[${defaultCode}]Product`;
+        }
+        return null;
+      } catch (err: any) {
+        logger.warn(MODULE, `Failed to fetch template name for tmpl_id=${productTmplId}: ${err.message}`);
+        return null;
+      }
+    }
+/** Fetch description from product.template for duplicated products.
+ * Tries multiple description fields. */
 export async function fetchTemplateDescription(productTmplId: number): Promise<string | null> {
   try {
     const result = await execute('product.template', 'read', [[productTmplId]], {
-                          fields: ['website_description'],
-                        });
-    if (result && result.length > 0 && result[0].website_description) {
-      return result[0].website_description;
+      fields: ['website_description', 'description', 'description_sale', 'description_variant'],
+    });
+    if (result && result.length > 0) {
+      const tmpl = result[0];
+      return tmpl.website_description || tmpl.description || tmpl.description_sale || tmpl.description_variant || null;
     }
     return null;
   } catch (err: any) {
@@ -530,4 +606,120 @@ export async function diagnoseSku(sku: string): Promise<{ product: any; template
     if (template.image_128) template.image_128 = '(binary omitted)';
   }
   return { product, template };
+}
+
+/** Search products by name in Odoo to find variants */
+export async function searchProductByName(searchTerm: string): Promise<{ id: number; name: string; default_code: string }[]> {
+  const products = await execute('product.product', 'search_read', [
+    [['name', 'ilike', searchTerm], ['sale_ok', '=', true]],
+  ], { fields: ['name', 'default_code'], limit: 20 });
+  return products;
+}
+
+/** Get ALL fields from product.template to find name fields */
+export async function getTemplateAllFields(sku: string): Promise<any> {
+  const products = await execute('product.product', 'search_read', [
+    [['default_code', '=', sku]],
+  ], { limit: 1 });
+  
+  if (!products || products.length === 0) return null;
+  const product = products[0];
+  
+  if (product.product_tmpl_id && Array.isArray(product.product_tmpl_id)) {
+    const tmplId = product.product_tmpl_id[0];
+    const templateData = await execute('product.template', 'read', [[tmplId]], {
+      fields: ['name', 'seo_name', 'url_slug', 'website_meta_title', 'display_name'],
+    });
+    return { product, template: templateData };
+  }
+  
+  return { product };
+}
+
+/** Fetch name from website by searching page for the SKU */
+export async function fetchNameFromWebsite(sku: string): Promise<string | null> {
+  try {
+    // Try the base URL and search for the SKU
+    const url = `${config.odoo.url}/shop?search=${sku}`;
+    const response = await axios.get(url, {
+      timeout: 15000,
+      maxRedirects: 10,
+      headers: { 
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' 
+      },
+    });
+    
+    const html = response.data;
+    
+    // Look for the product link containing this SKU
+    const productLinkMatch = html.match(new RegExp(`<a[^>]*href=["']/(shop/[0-9]+-${sku}[^"']*)[^>]*>`, 'i'));
+    
+    if (productLinkMatch) {
+      const productUrl = `${config.odoo.url}${productLinkMatch[1]}`;
+      const productResp = await axios.get(productUrl, {
+        timeout: 15000,
+        maxRedirects: 10,
+        headers: { 'User-Agent': 'Mozilla/5.0' },
+      });
+      
+      const productHtml = productResp.data;
+      
+      // Get the title
+      const metaTitleMatch = productHtml.match(/<meta[^>]*name=["']default_title["'][^>]*content=["']([^"']+)["']/i);
+      if (metaTitleMatch) {
+        const name = metaTitleMatch[1].replace(/\s*\|\s*onprotec\s*$/i, '').trim();
+        logger.info(MODULE, `fetchNameFromWebsite(${sku}): meta default_title="${name}"`);
+        return name;
+      }
+      
+      const ogTitleMatch = productHtml.match(/<meta[^>]*property=["']og:title["'][^>]*content=["']([^"']+)["']/i);
+      if (ogTitleMatch) {
+        return ogTitleMatch[1].trim();
+      }
+      
+      const titleMatch = productHtml.match(/<title>([^|<]+)/i);
+      if (titleMatch) {
+        return titleMatch[1].replace(/\s*\|\s*onprotec\s*$/i, '').trim();
+      }
+    }
+    
+    return null;
+  } catch (err: any) {
+    logger.warn(MODULE, `fetchNameFromWebsite error: ${err.message}`);
+    return null;
+  }
+}
+
+/** Debug: find the actual product name field by checking all possible name-related fields */
+export async function findProductName(sku: string): Promise<{ source: string; value: string }[]> {
+  const results: { source: string; value: string }[] = [];
+  
+  const products = await execute('product.product', 'search_read', [
+    [['default_code', '=', sku]],
+  ], { limit: 1 });
+  
+  if (!products || products.length === 0) return results;
+  const product = products[0];
+  
+  // Check product.product fields
+  results.push({ source: 'product_product.name', value: product.name || '' });
+  results.push({ source: 'product_product.default_code', value: product.default_code || '' });
+  
+  if (product.product_tmpl_id && Array.isArray(product.product_tmpl_id)) {
+    const tmplId = product.product_tmpl_id[0];
+    
+    // Get all fields from template (only valid fields)
+    const tmplResult = await execute('product.template', 'read', [[tmplId]], {
+      fields: ['name', 'display_name', 'default_code'],
+    });
+    
+    if (tmplResult && tmplResult.length > 0) {
+      const t = tmplResult[0];
+      results.push({ source: 'product_template.name', value: t.name || '' });
+      results.push({ source: 'product_template.display_name', value: t.display_name || '' });
+      results.push({ source: 'product_template.default_code', value: t.default_code || '' });
+    }
+  }
+  
+  return results;
 }

@@ -1,3 +1,5 @@
+import 'dotenv/config';
+
 export const config = {
   odoo: {
     url: process.env.ODOO_URL || 'https://www.onprotec.shop',

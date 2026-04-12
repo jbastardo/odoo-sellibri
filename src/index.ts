@@ -1,10 +1,11 @@
 import express from 'express';
 import * as cron from 'node-cron';
 import * as path from 'path';
+import axios from 'axios';
 import { config } from './config';
 import { logger } from './logger';
 import { syncMirror, syncPriceStock, syncSingleSku, getSyncStatus, requestAbort, resetSyncState } from './sync';
-import { fetchExcludedProducts, diagnoseSku } from './odoo';
+import { fetchExcludedProducts, diagnoseSku, findProductName, searchProductByName, getTemplateAllFields, fetchTemplateName, fetchNameFromWebsite } from './odoo';
 import { handleOrderWebhook, getRecentOrders } from './webhook';
 
 const app = express();
@@ -153,6 +154,101 @@ app.get('/api/diag/:sku', async (req, res) => {
       return;
     }
     res.json({ success: true, ...result });
+  } catch (err: any) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// --- Find actual name field for SKU ---
+app.get('/api/name/:sku', async (req, res) => {
+  const { sku } = req.params;
+  try {
+    const result = await findProductName(sku.trim());
+    res.json({ success: true, sku, fields: result });
+  } catch (err: any) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// --- Search products by name ---
+app.get('/api/search/:term', async (req, res) => {
+  const { term } = req.params;
+  try {
+    const result = await searchProductByName(term.trim());
+    res.json({ success: true, term, products: result });
+  } catch (err: any) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// --- Get ALL template fields ---
+app.get('/api/template-fields/:sku', async (req, res) => {
+  const { sku } = req.params;
+  try {
+    const result = await getTemplateAllFields(sku.trim());
+    res.json({ success: true, sku, data: result });
+  } catch (err: any) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// --- Fetch name from website using search ---
+app.get('/api/web-name/:sku', async (req, res) => {
+  const { sku } = req.params;
+  try {
+    // Search the product by SKU in the shop search page
+    const searchUrl = `${config.odoo.url}/shop?search=${sku}`;
+    const resp = await axios.get(searchUrl, {
+      timeout: 15000,
+      maxRedirects: 10,
+      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
+    });
+    
+    const html = resp.data;
+    
+    // Find all /shop/ links containing the SKU
+    const allLinks = html.match(/href="(\/shop\/[^"#]+)"/g) || [];
+    
+    let productLink = null;
+    for (const link of allLinks) {
+      if (link.includes(sku)) {
+        productLink = link.replace('href="', '').replace('"', '');
+        break;
+      }
+    }
+    
+    if (!productLink) {
+      // Try search for product name in page h-tag
+      const nameInSearch = html.match(new RegExp(`<h[^>]*>\\s*\\[${sku}\\]\\s*([^<]+)`));
+      if (nameInSearch) {
+        const urlMatch = html.match(new RegExp(`href="(/shop/[^"#]*${sku}[^"#"]*)"`));
+        if (urlMatch) {
+          productLink = urlMatch[1];
+        }
+      }
+    }
+    
+    if (productLink) {
+      // Clean the URL (remove query params)
+      productLink = productLink.split('?')[0];
+      const productUrl = `${config.odoo.url}${productLink}`;
+      
+      const productResp = await axios.get(productUrl, {
+        timeout: 15000,
+        maxRedirects: 10,
+        headers: { 'User-Agent': 'Mozilla/5.0' },
+      });
+      
+      const productHtml = productResp.data;
+      const metaTitleMatch = productHtml.match(/<meta[^>]*name=["']default_title["'][^>]*content=["']([^"']+)["']/i);
+      const ogTitleMatch = productHtml.match(/<meta[^>]*property=["']og:title["'][^>]*content=["']([^"']+)["']/i);
+      const name = metaTitleMatch?.[1] || ogTitleMatch?.[1];
+      const cleanName = name?.replace(/\s*\|\s*onprotec\s*$/i, '').trim();
+      
+      res.json({ success: true, sku, websiteName: cleanName, productUrl: productLink });
+    } else {
+      res.json({ success: true, sku, websiteName: null });
+    }
   } catch (err: any) {
     res.status(500).json({ success: false, message: err.message });
   }

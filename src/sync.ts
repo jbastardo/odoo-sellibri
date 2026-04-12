@@ -137,7 +137,7 @@ function cleanName(name: string): string {
 
 async function getProductTitle(product: odoo.OdooProduct): Promise<string> {
   if (product.product_tmpl_id && Array.isArray(product.product_tmpl_id)) {
-    const tmplName = await odoo.fetchTemplateName(product.product_tmpl_id[0]);
+    const tmplName = await odoo.fetchTemplateName(product.product_tmpl_id[0], product.default_code);
     if (tmplName) return cleanName(tmplName);
   }
   return cleanName(product.name);
