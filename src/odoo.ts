@@ -540,11 +540,11 @@ export async function fetchActiveCategories(): Promise<{ id: number; name: strin
 export async function fetchTemplateDescription(productTmplId: number): Promise<string | null> {
   try {
     const result = await execute('product.template', 'read', [[productTmplId]], {
-      fields: ['website_description', 'description', 'description_sale', 'description_variant'],
+      fields: ['website_description', 'description', 'description_sale'],
     });
     if (result && result.length > 0) {
       const tmpl = result[0];
-      return tmpl.website_description || tmpl.description || tmpl.description_sale || tmpl.description_variant || null;
+      return tmpl.website_description || tmpl.description || tmpl.description_sale || null;
     }
     return null;
   } catch (err: any) {
