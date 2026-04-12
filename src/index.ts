@@ -285,7 +285,49 @@ cron.schedule('*/15 * * * *', () => {
   });
 });
 
-// Cron 2: Sync Espejo DESACTIVADO -- solo manual desde dashboard
+// Cron 2: Sync Espejo a las 11:00 AM (Venezuela UTC-4 = 15:00 UTC) lun-vie
+cron.schedule('0 15 * * 1-5', () => {
+  if (!apiEnabled) {
+    logger.info('cron', 'Cron espejo 11am omitido -- API apagada');
+    return;
+  }
+  if (manualActionRunning) {
+    logger.info('cron', 'Cron espejo 11am omitido -- accion manual en curso');
+    return;
+  }
+  const status = getSyncStatus();
+  if (status.isRunning) {
+    logger.info('cron', 'Cron espejo 11am omitido -- sync en curso');
+    return;
+  }
+  logger.info('cron', 'Cron: sync espejo 11am (crear/actualizar/eliminar)');
+  syncMirror().catch(err => {
+    logger.error('cron', `Cron espejo 11am error: ${err.message}`);
+  });
+});
+
+// Cron 3: Sync Espejo a las 3:00 PM (Venezuela UTC-4 = 19:00 UTC) lun-vie
+cron.schedule('0 19 * * 1-5', () => {
+  if (!apiEnabled) {
+    logger.info('cron', 'Cron espejo 3pm omitido -- API apagada');
+    return;
+  }
+  if (manualActionRunning) {
+    logger.info('cron', 'Cron espejo 3pm omitido -- accion manual en curso');
+    return;
+  }
+  const status = getSyncStatus();
+  if (status.isRunning) {
+    logger.info('cron', 'Cron espejo 3pm omitido -- sync en curso');
+    return;
+  }
+  logger.info('cron', 'Cron: sync espejo 3pm (crear/actualizar/eliminar)');
+  syncMirror().catch(err => {
+    logger.error('cron', `Cron espejo 3pm error: ${err.message}`);
+  });
+});
+
+// OLD: Sync Espejo DESACTIVADO -- solo manual desde dashboard
 // cron.schedule('0 * * * *', () => {
 //   if (!apiEnabled) {
 //     logger.info('cron', 'Cron espejo omitido -- API apagada');
@@ -306,7 +348,7 @@ cron.schedule('*/15 * * * *', () => {
 //   });
 // });
 
-logger.info('server', 'Cron activo: precio/stock cada 15 min | espejo: solo manual');
+logger.info('server', 'Cron activo: precio/stock cada 15 min | espejo: 11am y 3pm lun-vie (Venezuela)');
 
 // === Start Server ===
 app.listen(config.port, () => {
