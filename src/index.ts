@@ -5,7 +5,7 @@ import axios from 'axios';
 import { config } from './config';
 import { logger } from './logger';
 import { syncMirror, syncPriceStock, syncSingleSku, getSyncStatus, requestAbort, resetSyncState } from './sync';
-import { fetchExcludedProducts, diagnoseSku, findProductName, searchProductByName, getTemplateAllFields, fetchTemplateName, fetchNameFromWebsite } from './odoo';
+import { fetchProducts, fetchExcludedProducts, diagnoseSku, findProductName, searchProductByName, getTemplateAllFields, fetchTemplateName, fetchNameFromWebsite, getProductWebsiteUrl } from './odoo';
 import { handleOrderWebhook, getRecentOrders } from './webhook';
 
 const app = express();
@@ -192,63 +192,122 @@ app.get('/api/template-fields/:sku', async (req, res) => {
   }
 });
 
-// --- Fetch name from website using search ---
+// --- Diagnostic: find products with name/code mismatch ---
+app.get('/api/diag-name-mismatch/:limit?', async (req, res) => {
+  const limit = parseInt(req.params.limit || '200') || 200;
+  try {
+    const allProducts = await fetchProducts();
+    const mismatches: any[] = [];
+    
+    for (const p of allProducts.slice(0, limit)) {
+      const sku = p.default_code;
+      const name = p.name || '';
+      if (!sku || !name) continue;
+      
+      const match = name.match(/\[([0-9]+)\]/);
+      if (match && match[1] !== sku) {
+        const websiteUrl = await getProductWebsiteUrl(sku);
+        mismatches.push({
+          sku,
+          nameSku: match[1],
+          name: name.substring(0, 100),
+          websiteUrl: websiteUrl?.substring(0, 80),
+        });
+      }
+    }
+    
+    res.json({ total: allProducts.length, checked: limit, mismatches: mismatches.slice(0, 50) });
+  } catch (err: any) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// --- Diagnostic: find products with wrong template association ---
+app.get('/api/diag-wrong-template/:limit?', async (req, res) => {
+  const limit = parseInt(req.params.limit || '500') || 500;
+  try {
+    const allProducts = await fetchProducts();
+    const wrongTemplates: any[] = [];
+    
+    for (const p of allProducts.slice(0, limit)) {
+      const sku = p.default_code;
+      const name = p.name || '';
+      if (!sku || !name) continue;
+      
+      const kitMatch = name.match(/\[(KIT[A-Z0-9]+)-/);
+      if (!kitMatch) continue;
+      const kitCode = kitMatch[1];
+      
+      const websiteUrl = await getProductWebsiteUrl(sku);
+      if (!websiteUrl) continue;
+      
+      const templateMatch = websiteUrl.match(/-(\d+)(?:#|$)/);
+      if (!templateMatch) continue;
+      const templateId = parseInt(templateMatch[1]);
+      
+      const urlKitMatch = websiteUrl.match(/\/shop\/(kit[A-Z0-9]+)-/i);
+      if (urlKitMatch && urlKitMatch[1].toUpperCase() !== kitCode.toUpperCase()) {
+        wrongTemplates.push({
+          sku,
+          kitInName: kitCode,
+          urlKit: urlKitMatch[1],
+          templateId,
+          name: name.substring(0, 80),
+          websiteUrl: websiteUrl.substring(0, 80),
+        });
+      }
+    }
+    
+    res.json({ total: allProducts.length, checked: limit, wrongTemplates });
+  } catch (err: any) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// --- Fetch name from website using product's website URL ---
 app.get('/api/web-name/:sku', async (req, res) => {
   const { sku } = req.params;
   try {
-    // Search the product by SKU in the shop search page
-    const searchUrl = `${config.odoo.url}/shop?search=${sku}`;
-    const resp = await axios.get(searchUrl, {
-      timeout: 15000,
-      maxRedirects: 10,
-      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
-    });
+    const debug: any = {};
     
-    const html = resp.data;
+    const websiteUrl = await getProductWebsiteUrl(sku);
+    debug.storedUrl = websiteUrl;
+    let fullUrl = websiteUrl?.startsWith('http') ? websiteUrl : websiteUrl ? `${config.odoo.url}${websiteUrl}` : null;
     
-    // Find all /shop/ links containing the SKU
-    const allLinks = html.match(/href="(\/shop\/[^"#]+)"/g) || [];
-    
-    let productLink = null;
-    for (const link of allLinks) {
-      if (link.includes(sku)) {
-        productLink = link.replace('href="', '').replace('"', '');
-        break;
+    if (!fullUrl) {
+      debug.search = 'trying shop search';
+      const searchResp = await axios.get(`${config.odoo.url}/shop?search=${sku}`, {
+        timeout: 15000,
+        maxRedirects: 10,
+        headers: { 'User-Agent': 'Mozilla/5.0' },
+      });
+      const searchHtml = searchResp.data;
+      const linkMatch = searchHtml.match(new RegExp(`<a[^>]*href=["'](/shop/[^"']*-${sku}[^"']*)[^>]*>`, 'i'));
+      if (linkMatch) {
+        fullUrl = `${config.odoo.url}${linkMatch[1]}`;
+        debug.foundBySearch = true;
       }
     }
     
-    if (!productLink) {
-      // Try search for product name in page h-tag
-      const nameInSearch = html.match(new RegExp(`<h[^>]*>\\s*\\[${sku}\\]\\s*([^<]+)`));
-      if (nameInSearch) {
-        const urlMatch = html.match(new RegExp(`href="(/shop/[^"#]*${sku}[^"#"]*)"`));
-        if (urlMatch) {
-          productLink = urlMatch[1];
-        }
-      }
-    }
-    
-    if (productLink) {
-      // Clean the URL (remove query params)
-      productLink = productLink.split('?')[0];
-      const productUrl = `${config.odoo.url}${productLink}`;
-      
-      const productResp = await axios.get(productUrl, {
+    if (fullUrl) {
+      const productResp = await axios.get(fullUrl, {
         timeout: 15000,
         maxRedirects: 10,
         headers: { 'User-Agent': 'Mozilla/5.0' },
       });
       
       const productHtml = productResp.data;
-      const metaTitleMatch = productHtml.match(/<meta[^>]*name=["']default_title["'][^>]*content=["']([^"']+)["']/i);
       const ogTitleMatch = productHtml.match(/<meta[^>]*property=["']og:title["'][^>]*content=["']([^"']+)["']/i);
-      const name = metaTitleMatch?.[1] || ogTitleMatch?.[1];
+      const metaTitleMatch = productHtml.match(/<meta[^>]*name=["']default_title["'][^>]*content=["']([^"']+)["']/i);
+      const titleMatch = productHtml.match(/<title>([^|<]+)/i);
+      const name = ogTitleMatch?.[1] || metaTitleMatch?.[1] || titleMatch?.[1];
       const cleanName = name?.replace(/\s*\|\s*onprotec\s*$/i, '').trim();
       
-      res.json({ success: true, sku, websiteName: cleanName, productUrl: productLink });
-    } else {
-      res.json({ success: true, sku, websiteName: null });
+      res.json({ success: true, sku, websiteName: cleanName, productUrl: fullUrl, debug });
+      return;
     }
+    
+    res.json({ success: true, sku, websiteName: null, debug });
   } catch (err: any) {
     res.status(500).json({ success: false, message: err.message });
   }
