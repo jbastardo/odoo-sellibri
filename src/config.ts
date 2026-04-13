@@ -16,4 +16,5 @@ export const config = {
   },
   ivaRate: parseFloat(process.env.IVA_RATE || '0.16'),
   port: parseInt(process.env.PORT || '3000', 10),
+  cronEnabled: process.env.CRON_ENABLED !== 'false',
 };
