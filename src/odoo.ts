@@ -481,7 +481,25 @@ export async function fetchActiveCategories(): Promise<{ id: number; name: strin
         const metaTitleMatch = productHtml.match(/<meta[^>]*name=["']default_title["'][^>]*content=["']([^"']+)["']/i);
         const ogTitleMatch = productHtml.match(/<meta[^>]*property=["']og:title["'][^>]*content=["']([^"']+)["']/i);
         const name = metaTitleMatch?.[1] || ogTitleMatch?.[1];
-        return name?.replace(/\s*\|\s*onprotec\s*$/i, '').trim() || null;
+        if (!name) return null;
+        
+        const normalized = name
+          .replace(/\s*\|\s*onprotec\s*$/i, '')
+          .replace(/"(?=\d)/g, 'pulg ')
+          .replace(/"/g, 'pulgadas')
+          .replace(/'/g, "'")
+          .replace(/\u2018|\u2019/g, "'")
+          .replace(/\u201C|\u201D/g, '"')
+          .replace(/\u2013/g, '-')
+          .replace(/\u2014/g, '--')
+          .replace(/\u00A9/g, '(C)')
+          .replace(/\u00AE/g, '(R)')
+          .replace(/\u2122/g, '(TM)')
+          .replace(/\u00B0/g, ' grados')
+          .replace(/\u00F1/g, 'ñ')
+          .replace(/\u00D1/g, 'Ñ')
+          .trim();
+        return normalized || null;
       } catch (err: any) {
         logger.warn(MODULE, `fetchNameFromOdooWebsite error: ${err.message}`);
         return null;
@@ -522,10 +540,38 @@ export async function fetchActiveCategories(): Promise<{ id: number; name: strin
           
           // Use template.name if valid
           if (name) {
-            return name.replace(/^copy\s+of\s+/i, '').trim();
+            return name
+              .replace(/^copy\s+of\s+/i, '')
+              .replace(/"(?=\d)/g, 'pulg ')
+              .replace(/"/g, 'pulgadas')
+              .replace(/\u2018|\u2019/g, "'")
+              .replace(/\u201C|\u201D/g, '"')
+              .replace(/\u2013/g, '-')
+              .replace(/\u2014/g, '--')
+              .replace(/\u00A9/g, '(C)')
+              .replace(/\u00AE/g, '(R)')
+              .replace(/\u2122/g, '(TM)')
+              .replace(/\u00B0/g, ' grados')
+              .replace(/\u00F1/g, 'ñ')
+              .replace(/\u00D1/g, 'Ñ')
+              .trim();
           }
           if (displayName) {
-            return displayName.replace(/^copy\s+of\s+/i, '').trim();
+            return displayName
+              .replace(/^copy\s+of\s+/i, '')
+              .replace(/"(?=\d)/g, 'pulg ')
+              .replace(/"/g, 'pulgadas')
+              .replace(/\u2018|\u2019/g, "'")
+              .replace(/\u201C|\u201D/g, '"')
+              .replace(/\u2013/g, '-')
+              .replace(/\u2014/g, '--')
+              .replace(/\u00A9/g, '(C)')
+              .replace(/\u00AE/g, '(R)')
+              .replace(/\u2122/g, '(TM)')
+              .replace(/\u00B0/g, ' grados')
+              .replace(/\u00F1/g, 'ñ')
+              .replace(/\u00D1/g, 'Ñ')
+              .trim();
           }
           if (defaultCode) return `[${defaultCode}]Product`;
         }

@@ -127,12 +127,32 @@ export function resetSyncState(): void {
 
 // --- Helpers ---
 
-function cleanName(name: string): string {
+function normalizeSpecialChars(name: string): string {
   if (!name) return name;
   return name
-    .replace(/\s*\(copia[r]?(\s*\d*)?\)/gi, '')
-    .replace(/\s*\(copy(\s*\d*)?\)/gi, '')
-    .trim();
+    .replace(/"(?=\d)/g, 'pulg ')
+    .replace(/"/g, 'pulgadas')
+    .replace(/'/g, "'")
+    .replace(/\u2018|\u2019/g, "'")
+    .replace(/\u201C|\u201D/g, '"')
+    .replace(/\u2013/g, '-')
+    .replace(/\u2014/g, '--')
+    .replace(/\u00A9/g, '(C)')
+    .replace(/\u00AE/g, '(R)')
+    .replace(/\u2122/g, '(TM)')
+    .replace(/\u00B0/g, ' grados')
+    .replace(/\u00F1/g, 'ñ')
+    .replace(/\u00D1/g, 'Ñ');
+}
+
+function cleanName(name: string): string {
+  if (!name) return name;
+  return normalizeSpecialChars(
+    name
+      .replace(/\s*\(copia[r]?(\s*\d*)?\)/gi, '')
+      .replace(/\s*\(copy(\s*\d*)?\)/gi, '')
+      .trim()
+  );
 }
 
 async function getProductTitle(product: odoo.OdooProduct): Promise<string> {
@@ -155,8 +175,8 @@ async function getDescription(product: odoo.OdooProduct): Promise<string> {
     raw = product.website_description || product.description_sale || '';
   }
   if (typeof raw !== 'string') return '';
-  // Preserve HTML formatting from Odoo website
-  return raw.trim();
+  // Preserve HTML formatting but normalize special chars
+  return normalizeSpecialChars(raw.trim());
 }
 function getSellibriPrice(product: odoo.OdooProduct): string {
   const pwt = product.price_with_tax;
