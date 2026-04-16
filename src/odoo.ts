@@ -78,8 +78,8 @@ export interface OdooProduct {
   list_price: number;
   price_with_tax: number;
   qty_available: number;
-  free_qty: number;
   virtual_available: number;
+  free_qty: number;
   weight: number;
   barcode: string | false;
   categ_id: [number, string] | false;
@@ -119,7 +119,7 @@ export async function fetchProducts(
   // Images are fetched individually per-product in fetchProductMainImage().
   const products = await execute('product.product', 'search_read', [domain], {
     fields: [
-      'name', 'default_code', 'list_price', 'price_with_tax', 'qty_available', 'free_qty', 'virtual_available', 'weight',
+      'name', 'default_code', 'list_price', 'price_with_tax', 'qty_available', 'virtual_available', 'free_qty', 'weight',
       'barcode', 'categ_id', 'brand_id', 'description_sale',
       'website_description', 'product_tmpl_id', 'product_template_image_ids',
       'write_date', 'sale_ok', 'type',
@@ -149,13 +149,13 @@ export async function fetchAllProducts(lastWriteDate?: string): Promise<OdooProd
   return all;
 }
 
-/** Lightweight fetch: SKU + free_qty + price_with_tax for price/stock sync */
+/** Lightweight fetch: SKU + qty_available + virtual_available + free_qty + price_with_tax for price/stock sync */
 export interface StockPriceProduct {
   id: number;
   default_code: string;
   qty_available: number;
-  free_qty: number;
   virtual_available: number;
+  free_qty: number;
   price_with_tax: number;
 }
 
@@ -168,7 +168,7 @@ export async function fetchStockAndPrices(): Promise<StockPriceProduct[]> {
     const batch = await execute('product.product', 'search_read', [
       [['sale_ok', '=', true], ['type', 'in', ['product', 'consu']], ['default_code', '!=', false], ['default_code', '!=', '']],
     ], {
-      fields: ['default_code', 'qty_available', 'free_qty', 'virtual_available', 'price_with_tax'],
+      fields: ['default_code', 'qty_available', 'virtual_available', 'free_qty', 'price_with_tax'],
       offset,
       limit: batchSize,
     });
@@ -327,7 +327,7 @@ export async function fetchProductBySku(sku: string): Promise<OdooProduct | null
     [['default_code', '=', sku], ['sale_ok', '=', true], ['type', 'in', ['product', 'consu']]],
   ], {
     fields: [
-      'name', 'default_code', 'list_price', 'price_with_tax', 'qty_available', 'free_qty', 'virtual_available', 'weight',
+      'name', 'default_code', 'list_price', 'price_with_tax', 'qty_available', 'virtual_available', 'free_qty', 'weight',
       'barcode', 'categ_id', 'brand_id', 'description_sale',
       'website_description', 'product_tmpl_id', 'product_template_image_ids',
       'write_date', 'sale_ok', 'type',
