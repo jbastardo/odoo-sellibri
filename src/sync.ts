@@ -258,7 +258,7 @@ async function buildFullPayload(
     tax_rate_id: config.sellibri.taxRateId,
     stock_items_attributes: [{
       stock_location_id: config.sellibri.stockLocationId,
-      available: Math.max(0, Math.floor(odooProduct.free_qty || odooProduct.qty_available || 0)),
+      available: Math.max(0, Math.floor(odooProduct.virtual_available || odooProduct.qty_available || 0)),
     }],
   };
 
@@ -292,7 +292,7 @@ async function buildDiffPayload(
   if (!variant) return await buildFullPayload(odooProduct, false);
 
   const odooPrice = getSellibriPrice(odooProduct);
-  const odooStock = Math.max(0, Math.floor(odooProduct.free_qty || odooProduct.qty_available || 0));
+  const odooStock = Math.max(0, Math.floor(odooProduct.virtual_available || odooProduct.qty_available || 0));
   const odooTitle = await getProductTitle(odooProduct);
     const odooDescription = await getDescription(odooProduct);
   const categId = Array.isArray(odooProduct.categ_id) ? odooProduct.categ_id[0] : 0;
@@ -722,7 +722,7 @@ export async function syncPriceStock(): Promise<void> {
     for (const p of products) {
       if (p.default_code) {
         odooDataMap.set(p.default_code, {
-          qty: Math.max(0, Math.floor(p.free_qty || p.qty_available || 0)),
+          qty: Math.max(0, Math.floor(p.virtual_available || p.qty_available || 0)),
           price: p.price_with_tax > 0 ? p.price_with_tax.toFixed(2) : '0.00',
         });
       }
