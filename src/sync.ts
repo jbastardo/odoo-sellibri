@@ -474,7 +474,7 @@ export async function syncMirror(): Promise<MirrorSyncResult> {
             sellibriVariantId: existing.all_variants?.[0]?.id || 0,
             odooWriteDate: product.write_date,
             lastSynced: new Date().toISOString(),
-            lastStock: Math.max(0, Math.floor(product.qty_available || 0)),
+            lastStock: Math.max(0, Math.floor(product.virtual_available || product.qty_available || 0)),
             lastPrice: getSellibriPrice(product),
           };
         } else {
@@ -487,7 +487,7 @@ export async function syncMirror(): Promise<MirrorSyncResult> {
             sellibriVariantId: newProduct.all_variants?.[0]?.id || 0,
             odooWriteDate: product.write_date,
             lastSynced: new Date().toISOString(),
-            lastStock: Math.max(0, Math.floor(product.qty_available || 0)),
+            lastStock: Math.max(0, Math.floor(product.virtual_available || product.qty_available || 0)),
             lastPrice: getSellibriPrice(product),
           };
         }
@@ -667,7 +667,7 @@ export async function syncSingleSku(sku: string): Promise<{ success: boolean; me
       sellibriVariantId: variantId,
       odooWriteDate: odooProduct.write_date,
       lastSynced: new Date().toISOString(),
-      lastStock: Math.max(0, Math.floor(odooProduct.qty_available || 0)),
+      lastStock: Math.max(0, Math.floor(odooProduct.virtual_available || odooProduct.qty_available || 0)),
       lastPrice: getSellibriPrice(odooProduct),
     };
     saveState(state);
