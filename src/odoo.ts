@@ -77,6 +77,7 @@ export interface OdooProduct {
   default_code: string;
   list_price: number;
   price_with_tax: number;
+  available_quantity: number;
   qty_available: number;
   weight: number;
   barcode: string | false;
@@ -117,7 +118,7 @@ export async function fetchProducts(
   // Images are fetched individually per-product in fetchProductMainImage().
   const products = await execute('product.product', 'search_read', [domain], {
     fields: [
-      'name', 'default_code', 'list_price', 'price_with_tax', 'qty_available', 'weight',
+      'name', 'default_code', 'list_price', 'price_with_tax', 'qty_available', 'available_quantity', 'weight',
       'barcode', 'categ_id', 'brand_id', 'description_sale',
       'website_description', 'product_tmpl_id', 'product_template_image_ids',
       'write_date', 'sale_ok', 'type',
@@ -147,10 +148,11 @@ export async function fetchAllProducts(lastWriteDate?: string): Promise<OdooProd
   return all;
 }
 
-/** Lightweight fetch: SKU + qty_available + price_with_tax for price/stock sync */
+/** Lightweight fetch: SKU + available_quantity + price_with_tax for price/stock sync */
 export interface StockPriceProduct {
   id: number;
   default_code: string;
+  available_quantity: number;
   qty_available: number;
   price_with_tax: number;
 }
@@ -164,7 +166,7 @@ export async function fetchStockAndPrices(): Promise<StockPriceProduct[]> {
     const batch = await execute('product.product', 'search_read', [
       [['sale_ok', '=', true], ['type', 'in', ['product', 'consu']], ['default_code', '!=', false], ['default_code', '!=', '']],
     ], {
-      fields: ['default_code', 'qty_available', 'price_with_tax'],
+      fields: ['default_code', 'available_quantity', 'qty_available', 'price_with_tax'],
       offset,
       limit: batchSize,
     });
@@ -323,7 +325,7 @@ export async function fetchProductBySku(sku: string): Promise<OdooProduct | null
     [['default_code', '=', sku], ['sale_ok', '=', true], ['type', 'in', ['product', 'consu']]],
   ], {
     fields: [
-      'name', 'default_code', 'list_price', 'price_with_tax', 'qty_available', 'weight',
+      'name', 'default_code', 'list_price', 'price_with_tax', 'qty_available', 'available_quantity', 'weight',
       'barcode', 'categ_id', 'brand_id', 'description_sale',
       'website_description', 'product_tmpl_id', 'product_template_image_ids',
       'write_date', 'sale_ok', 'type',
