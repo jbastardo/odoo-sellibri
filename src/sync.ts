@@ -261,6 +261,8 @@ async function buildFullPayload(
       available: Math.max(0, Math.floor(odooProduct.virtual_available || odooProduct.qty_available || 0)),
     }],
   };
+  
+  logger.info(MODULE, `buildFullPayload SKU=${odooProduct.default_code}: qty_available=${odooProduct.qty_available}, virtual_available=${odooProduct.virtual_available}, sending available=${Math.max(0, Math.floor(odooProduct.virtual_available || odooProduct.qty_available || 0))}`);
 
   if (includeImages) {
     const imagesAttrs = buildImagesPayload(odooProduct, title);
