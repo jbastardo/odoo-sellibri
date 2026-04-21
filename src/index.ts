@@ -325,6 +325,7 @@ app.get('/health', (_req, res) => {
 
 // Cron 1: Precio/Stock cada 15 min
 cron.schedule('*/15 * * * *', () => {
+  logger.info('cron', 'Iniciando sync precio/stock...');
   if (!config.cronEnabled) {
     logger.info('cron', 'Cron precio/stock omitido -- Cron deshabilitado en config');
     return;
@@ -350,6 +351,7 @@ cron.schedule('*/15 * * * *', () => {
 
 // Cron 2: Sync Espejo a las 11:00 AM (Venezuela UTC-4 = 15:00 UTC) lun-vie
 cron.schedule('0 15 * * 1-5', () => {
+  logger.info('cron', 'Iniciando sync espejo 11am...');
   if (!config.cronEnabled) {
     logger.info('cron', 'Cron espejo 11am omitido -- Cron deshabilitado en config');
     return;
@@ -375,6 +377,7 @@ cron.schedule('0 15 * * 1-5', () => {
 
 // Cron 3: Sync Espejo a las 3:00 PM (Venezuela UTC-4 = 19:00 UTC) lun-vie
 cron.schedule('0 19 * * 1-5', () => {
+  logger.info('cron', 'Iniciando sync espejo 3pm...');
   if (!config.cronEnabled) {
     logger.info('cron', 'Cron espejo 3pm omitido -- Cron deshabilitado en config');
     return;
