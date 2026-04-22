@@ -213,7 +213,7 @@ function updateProgress(done: number, total: number, batchStartTime: number, pre
 }
 
 function isValidForSellibri(product: odoo.OdooProduct): boolean {
-  if (!product.name || product.name.trim() === '') return false;
+  if (!product.default_code || product.default_code.trim() === '') return false;
   const price = parseFloat(getSellibriPrice(product));
   if (isNaN(price) || price <= 0) return false;
   return true;
