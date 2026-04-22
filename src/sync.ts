@@ -455,6 +455,7 @@ export async function syncMirror(): Promise<MirrorSyncResult> {
       if (!sku) { processed++; continue; }
 
       if (!isValidForSellibri(product)) {
+        logger.warn(MODULE, `SKU=${sku}: skipped invalid (price=${product.price_with_tax || product.list_price}, name=${product.name ? 'yes' : 'no'})`);
         result.skippedInvalid++;
         processed++;
         updateProgress(processed, totalWork, batchStartTime, 'Espejo:');
@@ -496,8 +497,9 @@ export async function syncMirror(): Promise<MirrorSyncResult> {
       } catch (err: any) {
         result.errors++;
         const status = (err as any)?.response?.status;
+        const errData = (err as any)?.response?.data;
         if (status === 400) {
-          logger.warn(MODULE, `SKU=${sku}: 400 Bad Request (skipped)`);
+          logger.warn(MODULE, `SKU=${sku}: 400 Bad Request (skipped) - ${JSON.stringify(errData)?.substring(0, 500)}`);
         } else {
           logger.error(MODULE, `Error SKU=${sku}: ${err.message}`);
         }
