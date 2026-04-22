@@ -482,6 +482,7 @@ export async function syncMirror(): Promise<MirrorSyncResult> {
           };
         } else {
           const payload = await buildFullPayload(product, true);
+          logger.info(MODULE, `Creating SKU=${sku} title="${payload.product.title}" price=${payload.product.master_attributes?.price} stock=${payload.product.master_attributes?.stock_items_attributes?.[0]?.available}`);
           const newProduct = await sellibri.createProduct(payload);
           result.created++;
           logger.info(MODULE, `Created SKU=${sku} (id=${newProduct.id})`);
