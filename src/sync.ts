@@ -516,12 +516,18 @@ export async function syncMirror(): Promise<MirrorSyncResult> {
 
     // Phase 3: Delete orphans
     if (!abortRequested) {
+      const processedSkus = new Set<string>();
+      for (const sku of Object.keys(state.products)) {
+        processedSkus.add(sku);
+      }
+      
       const orphans: { sku: string; sellibriId: number }[] = [];
       const seenIds = new Set<number>();
       for (const [sku, product] of sellibriCatalog) {
         if (!odooSkuSet.has(sku) && !seenIds.has(product.id)) {
           orphans.push({ sku, sellibriId: product.id });
           seenIds.add(product.id);
+          logger.info(MODULE, `Orphan identified: SKU=${sku} id=${product.id} title="${product.title}"`);
         }
       }
 
