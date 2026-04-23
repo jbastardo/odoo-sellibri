@@ -127,7 +127,7 @@ export async function fetchProducts(
     ],
     offset,
     limit,
-    order: 'write_date asc',
+    order: 'write_date asc, id asc',
   });
 
   return products as OdooProduct[];

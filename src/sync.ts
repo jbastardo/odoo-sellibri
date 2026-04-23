@@ -554,6 +554,65 @@ export async function syncMirror(): Promise<MirrorSyncResult> {
       const extraSkusFound = [...odooActiveSkus].filter(s => !odooSkuSet.has(s));
       if (extraSkusFound.length > 0) {
         logger.warn(MODULE, `Found ${extraSkusFound.length} SKUs in Odoo that were missed by full product fetch (e.g., ${extraSkusFound.slice(0, 5).join(', ')})`);
+        
+        // Phase 3.5: Sync the missed products by fetching them individually
+        logger.info(MODULE, `Syncing ${extraSkusFound.length} missed products individually...`);
+        syncStatus.progress = {
+          current: 0, total: extraSkusFound.length,
+          phase: `Sincronizando ${extraSkusFound.length} productos perdidos...`,
+          startedAt: syncStatus.progress?.startedAt || new Date().toISOString(),
+          estimatedSecondsLeft: null,
+        };
+        
+        let syncedMissed = 0;
+        for (let i = 0; i < extraSkusFound.length; i++) {
+          if (abortRequested) break;
+          const missedSku = extraSkusFound[i];
+          try {
+            const missedProduct = await odoo.fetchProductBySku(missedSku);
+            if (!missedProduct || !isValidForSellibri(missedProduct)) {
+              logger.warn(MODULE, `Missed SKU=${missedSku}: invalid or not found individually`);
+              continue;
+            }
+            
+            const existing = sellibriCatalog.get(missedSku);
+            if (existing) {
+              const diffPayload = await buildDiffPayload(missedProduct, existing);
+              if (diffPayload) {
+                await sellibri.updateProduct(existing.id, diffPayload);
+                result.updated++;
+              } else {
+                result.unchanged++;
+              }
+            } else {
+              const payload = await buildFullPayload(missedProduct, true);
+              const newProduct = await sellibri.createProduct(payload);
+              result.created++;
+              logger.info(MODULE, `Created missed SKU=${missedSku} (id=${newProduct.id})`);
+              sellibriCatalog.set(missedSku, newProduct);
+            }
+            
+            state.products[missedSku] = {
+              sellibriId: existing?.id || (await sellibri.getCatalog()).get(missedSku)?.id || 0,
+              sellibriVariantId: 0,
+              odooWriteDate: missedProduct.write_date,
+              lastSynced: new Date().toISOString(),
+              lastStock: Math.max(0, Math.floor(missedProduct.virtual_available || missedProduct.qty_available || 0)),
+              lastPrice: getSellibriPrice(missedProduct),
+            };
+            syncedMissed++;
+          } catch (err: any) {
+            result.errors++;
+            logger.error(MODULE, `Error syncing missed SKU=${missedSku}: ${err.message}`);
+          }
+          
+          updateProgress(i + 1, extraSkusFound.length, Date.now(), 'Sincronizando perdidos:');
+          if ((i + 1) % 50 === 0) {
+            saveState(state);
+            logger.info(MODULE, `Missed products: ${i + 1}/${extraSkusFound.length} (synced=${syncedMissed}, errors=${result.errors})`);
+          }
+        }
+        logger.info(MODULE, `Missed products sync complete: ${syncedMissed} synced, ${extraSkusFound.length - syncedMissed} failed/skipped`);
       }
       
       for (const [sku, product] of sellibriCatalog) {
