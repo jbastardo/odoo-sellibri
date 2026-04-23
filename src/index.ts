@@ -4,7 +4,7 @@ import * as path from 'path';
 import axios from 'axios';
 import { config } from './config';
 import { logger } from './logger';
-import { syncMirror, syncPriceStock, syncSingleSku, getSyncStatus, requestAbort, resetSyncState } from './sync';
+import { syncMirror, syncPriceStock, syncSingleSku, restoreProduct, getSyncStatus, requestAbort, resetSyncState, getProtectedSkus, addProtectedSku, removeProtectedSku } from './sync';
 import { fetchProducts, fetchExcludedProducts, diagnoseSku, findProductName, searchProductByName, getTemplateAllFields, fetchTemplateName, fetchNameFromWebsite, getProductWebsiteUrl } from './odoo';
 import { handleOrderWebhook, getRecentOrders } from './webhook';
 
@@ -126,6 +126,52 @@ app.post('/api/sync/reset', (_req, res) => {
   }
   resetSyncState();
   res.json({ success: true, message: 'Estado de sincronizacion eliminado. La proxima sync empezara desde cero.' });
+});
+
+// --- Restore product ---
+app.post('/api/sync/restore/:sku', async (req, res) => {
+  const { sku } = req.params;
+  if (!sku || sku.trim() === '') {
+    res.status(400).json({ success: false, message: 'SKU requerido' });
+    return;
+  }
+  if (!startManualAction(`Restore ${sku.trim()}`)) {
+    res.json({ success: false, message: 'Ya hay una sincronizacion en curso' });
+    return;
+  }
+  try {
+    const result = await restoreProduct(sku.trim());
+    res.json(result);
+  } catch (err: any) {
+    res.json({ success: false, message: err.message });
+  } finally {
+    endManualAction(`Restore ${sku.trim()}`);
+  }
+});
+
+// --- Protected SKUs management ---
+app.get('/api/protected-skus', (_req, res) => {
+  res.json({ success: true, skus: getProtectedSkus() });
+});
+
+app.post('/api/protected-skus/add', (_req, res) => {
+  const sku = _req.body?.sku;
+  if (!sku || sku.trim() === '') {
+    res.status(400).json({ success: false, message: 'SKU requerido' });
+    return;
+  }
+  addProtectedSku(sku.trim());
+  res.json({ success: true, message: `SKU ${sku.trim()} agregado a la lista de proteccion`, skus: getProtectedSkus() });
+});
+
+app.post('/api/protected-skus/remove', (_req, res) => {
+  const sku = _req.body?.sku;
+  if (!sku || sku.trim() === '') {
+    res.status(400).json({ success: false, message: 'SKU requerido' });
+    return;
+  }
+  removeProtectedSku(sku.trim());
+  res.json({ success: true, message: `SKU ${sku.trim()} removido de la lista de proteccion`, skus: getProtectedSkus() });
 });
 
 // --- Diagnostic ---

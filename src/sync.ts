@@ -8,6 +8,25 @@ import { mapBrandToVendor } from './brand-map';
 import { logger } from './logger';
 
 const MODULE = 'sync';
+
+export function getProtectedSkus(): string[] {
+  return config.deleteProtectionSkus;
+}
+
+export function addProtectedSku(sku: string): void {
+  if (!config.deleteProtectionSkus.includes(sku)) {
+    config.deleteProtectionSkus.push(sku);
+    logger.info(MODULE, `Added SKU=${sku} to protection whitelist`);
+  }
+}
+
+export function removeProtectedSku(sku: string): void {
+  const idx = config.deleteProtectionSkus.indexOf(sku);
+  if (idx >= 0) {
+    config.deleteProtectionSkus.splice(idx, 1);
+    logger.info(MODULE, `Removed SKU=${sku} from protection whitelist`);
+  }
+}
 const STATE_FILE = path.join(process.cwd(), 'sync-state.json');
 
 // ===============================================================
@@ -519,12 +538,18 @@ export async function syncMirror(): Promise<MirrorSyncResult> {
     if (!abortRequested) {
       const orphans: { sku: string; sellibriId: number }[] = [];
       const seenIds = new Set<number>();
+      const protectedSkus = new Set(config.deleteProtectionSkus);
       for (const [sku, product] of sellibriCatalog) {
         if (!odooSkuSet.has(sku) && !seenIds.has(product.id)) {
           // Don't delete products that were previously synced (might be in Odoo but filtered out)
           const previouslySynced = state.products[sku];
           if (previouslySynced) {
             logger.warn(MODULE, `Keeping previously synced SKU=${sku} (not in current Odoo fetch but was synced before)`);
+            continue;
+          }
+          // Don't delete products that are in the protection whitelist
+          if (protectedSkus.has(sku)) {
+            logger.warn(MODULE, `Keeping protected SKU=${sku} (in DELETE_PROTECTION_SKUS whitelist)`);
             continue;
           }
           orphans.push({ sku, sellibriId: product.id });
@@ -692,6 +717,58 @@ export async function syncSingleSku(sku: string): Promise<{ success: boolean; me
     };
   } catch (err: any) {
     logger.error(MODULE, `Actualizar SKU=${sku} failed: ${err.message}`);
+    return { success: false, message: err.message };
+  }
+}
+
+export async function restoreProduct(sku: string): Promise<{ success: boolean; message: string }> {
+  logger.info(MODULE, `Restaurar SKU=${sku}...`);
+  try {
+    const odooProduct = await odoo.fetchProductBySku(sku);
+    if (!odooProduct) {
+      return { success: false, message: `SKU ${sku} no encontrado en Odoo` };
+    }
+    if (!isValidForSellibri(odooProduct)) {
+      return { success: false, message: `SKU ${sku} no tiene datos validos (precio=0 o sin nombre)` };
+    }
+
+    const catalog = await sellibri.getCatalog();
+    const existingProduct = catalog.get(sku);
+    if (existingProduct) {
+      return { success: false, message: `SKU ${sku} ya existe en Sellibri (id=${existingProduct.id})` };
+    }
+
+    const odooCategories = await odoo.fetchActiveCategories();
+    await buildCategoryMap(odooCategories);
+
+    const payload = await buildFullPayload(odooProduct, true);
+    const title = await getProductTitle(odooProduct);
+    payload.product.title = title;
+    
+    const newProduct = await sellibri.createProduct(payload);
+    const sellibriId = newProduct.id;
+    const variantId = newProduct.all_variants?.[0]?.id || 0;
+
+    logger.info(MODULE, `SKU=${sku}: restored id=${sellibriId} title="${title}"`);
+
+    const state = loadState();
+    state.products[sku] = {
+      sellibriId,
+      sellibriVariantId: variantId,
+      odooWriteDate: odooProduct.write_date,
+      lastSynced: new Date().toISOString(),
+      lastStock: Math.max(0, Math.floor(odooProduct.virtual_available || odooProduct.qty_available || 0)),
+      lastPrice: getSellibriPrice(odooProduct),
+    };
+    saveState(state);
+
+    const imagesCount = (newProduct.all_variants?.[0]?.images || []).length;
+    return {
+      success: true,
+      message: `SKU ${sku} restaurado -- "${title}"${imagesCount > 0 ? ` + ${imagesCount} imagenes` : ''}`,
+    };
+  } catch (err: any) {
+    logger.error(MODULE, `Restaurar SKU=${sku} failed: ${err.message}`);
     return { success: false, message: err.message };
   }
 }
