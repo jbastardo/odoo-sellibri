@@ -106,6 +106,7 @@ export async function fetchProducts(
   lastWriteDate?: string,
 ): Promise<OdooProduct[]> {
   const domain: any[] = [
+    ['active', '=', true],
     ['sale_ok', '=', true],
     ['type', 'in', ['product', 'consu']],
     ['default_code', '!=', false],
@@ -166,7 +167,7 @@ export async function fetchStockAndPrices(): Promise<StockPriceProduct[]> {
 
   while (true) {
     const batch = await execute('product.product', 'search_read', [
-      [['sale_ok', '=', true], ['type', 'in', ['product', 'consu']], ['default_code', '!=', false], ['default_code', '!=', '']],
+      [['active', '=', true], ['sale_ok', '=', true], ['type', 'in', ['product', 'consu']], ['default_code', '!=', false], ['default_code', '!=', '']],
     ], {
       fields: ['default_code', 'qty_available', 'virtual_available', 'free_qty', 'price_with_tax'],
       offset,
@@ -324,7 +325,7 @@ export async function findProductBySku(sku: string): Promise<number | null> {
 /** Fetch a single product by SKU with all sync-relevant fields */
 export async function fetchProductBySku(sku: string): Promise<OdooProduct | null> {
   const products = await execute('product.product', 'search_read', [
-    [['default_code', '=', sku], ['sale_ok', '=', true], ['type', 'in', ['product', 'consu']]],
+    [['default_code', '=', sku], ['active', '=', true], ['sale_ok', '=', true], ['type', 'in', ['product', 'consu']]],
   ], {
     fields: [
       'name', 'default_code', 'list_price', 'price_with_tax', 'qty_available', 'virtual_available', 'free_qty', 'weight',
@@ -347,7 +348,7 @@ export async function fetchAllActiveSKUs(): Promise<Set<string>> {
 
   while (true) {
     const batch = await execute('product.product', 'search_read', [
-      [['sale_ok', '=', true], ['type', 'in', ['product', 'consu']], ['default_code', '!=', false], ['default_code', '!=', '']],
+      [['active', '=', true], ['sale_ok', '=', true], ['type', 'in', ['product', 'consu']], ['default_code', '!=', false], ['default_code', '!=', '']],
     ], {
       fields: ['default_code'],
       offset,
@@ -437,7 +438,7 @@ export async function fetchActiveCategories(): Promise<{ id: number; name: strin
 
   // Only return categories that have at least one active product
   const products = await execute('product.product', 'search_read', [
-    [['sale_ok', '=', true], ['type', 'in', ['product', 'consu']], ['default_code', '!=', false]],
+    [['active', '=', true], ['sale_ok', '=', true], ['type', 'in', ['product', 'consu']], ['default_code', '!=', false]],
   ], { fields: ['categ_id'], limit: 10000 });
 
   const usedIds = new Set<number>();

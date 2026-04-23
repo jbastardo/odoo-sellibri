@@ -54,6 +54,8 @@ interface ProductSyncEntry {
   lastSynced: string;
   lastStock?: number;
   lastPrice?: string;
+  missingSince?: string;
+  missingCount?: number;
 }
 
 interface SyncState {
@@ -474,7 +476,10 @@ export async function syncMirror(): Promise<MirrorSyncResult> {
       if (!sku) { processed++; continue; }
 
       if (!isValidForSellibri(product)) {
-        logger.warn(MODULE, `SKU=${sku}: skipped invalid (price=${product.price_with_tax || product.list_price}, name=${product.name ? 'yes' : 'no'})`);
+        const price = product.price_with_tax || product.list_price;
+        const priceWithTax = product.price_with_tax;
+        const listPrice = product.list_price;
+        logger.warn(MODULE, `SKU=${sku}: skipped invalid -- price_with_tax=${priceWithTax}, list_price=${listPrice}, effective_price=${price}, has_name=${product.name ? 'yes' : 'no'}`);
         result.skippedInvalid++;
         processed++;
         updateProgress(processed, totalWork, batchStartTime, 'Espejo:');
@@ -535,12 +540,24 @@ export async function syncMirror(): Promise<MirrorSyncResult> {
 
     // Phase 3: Delete orphans
     // Only delete products that are NOT in Odoo AND were never synced before
+    let verifiedOdooSkuSet: Set<string> | null = null;
     if (!abortRequested) {
       const orphans: { sku: string; sellibriId: number }[] = [];
       const seenIds = new Set<number>();
       const protectedSkus = new Set(config.deleteProtectionSkus);
+      
+      // Fallback verification: fetch all active SKUs from Odoo to confirm which products truly exist.
+      // This catches products that might be missed by fetchAllProducts() due to pagination or filtering issues.
+      logger.info(MODULE, 'Mirror sync: verifying SKU existence with lightweight Odoo query...');
+      const odooActiveSkus = await odoo.fetchAllActiveSKUs();
+      verifiedOdooSkuSet = new Set<string>([...odooSkuSet, ...odooActiveSkus]);
+      const extraSkusFound = [...odooActiveSkus].filter(s => !odooSkuSet.has(s));
+      if (extraSkusFound.length > 0) {
+        logger.warn(MODULE, `Found ${extraSkusFound.length} SKUs in Odoo that were missed by full product fetch (e.g., ${extraSkusFound.slice(0, 5).join(', ')})`);
+      }
+      
       for (const [sku, product] of sellibriCatalog) {
-        if (!odooSkuSet.has(sku) && !seenIds.has(product.id)) {
+        if (!verifiedOdooSkuSet.has(sku) && !seenIds.has(product.id)) {
           // Don't delete products that were previously synced (might be in Odoo but filtered out)
           const previouslySynced = state.products[sku];
           if (previouslySynced) {
@@ -624,9 +641,37 @@ export async function syncMirror(): Promise<MirrorSyncResult> {
     }
 
     state.lastMirrorSync = new Date().toISOString();
+    // Grace period: don't immediately remove products from state if missing from Odoo fetch.
+    // Products are only removed after 3 consecutive syncs where they're not found.
+    // This protects against intermittent Odoo API issues, pagination race conditions,
+    // or temporary filtering problems (e.g., BOM components, price=0 products).
+    const gracePeriodSyncs = 3;
+    // Use verifiedOdooSkuSet for state cleanup (includes fallback SKU verification), fallback to odooSkuSet if abort was requested
+    const cleanupSkuSet = verifiedOdooSkuSet || odooSkuSet;
     for (const sku of Object.keys(state.products)) {
-      if (!odooSkuSet.has(sku)) {
-        delete state.products[sku];
+      if (!cleanupSkuSet.has(sku)) {
+        const entry = state.products[sku];
+        if (!entry.missingSince) {
+          entry.missingSince = new Date().toISOString();
+          entry.missingCount = 1;
+          logger.warn(MODULE, `SKU=${sku}: not in Odoo fetch, marking as missing (1/${gracePeriodSyncs})`);
+        } else {
+          entry.missingCount = (entry.missingCount || 0) + 1;
+          if (entry.missingCount >= gracePeriodSyncs) {
+            logger.warn(MODULE, `SKU=${sku}: missing for ${gracePeriodSyncs} consecutive syncs, removing from state`);
+            delete state.products[sku];
+          } else {
+            logger.warn(MODULE, `SKU=${sku}: still missing (${entry.missingCount}/${gracePeriodSyncs}), keeping in state`);
+          }
+        }
+      } else {
+        // Product found again, reset missing tracking
+        const entry = state.products[sku];
+        if (entry.missingSince) {
+          logger.info(MODULE, `SKU=${sku}: found in Odoo fetch again, resetting missing tracking`);
+          delete entry.missingSince;
+          delete entry.missingCount;
+        }
       }
     }
     saveState(state);
