@@ -197,7 +197,7 @@
 
         // Fetch cron status
         try {
-          const cronResp = await fetch('/api/cron/toggle', { method: 'POST' });
+          const cronResp = await fetch('/api/cron/status');
           const cronData = await cronResp.json();
           const badge = document.getElementById('cron-badge');
           if (cronData.cronEnabled) {
@@ -360,9 +360,9 @@
         const resp = await fetch('/api/cron/toggle', { method: 'POST' });
         const data = await resp.json();
         if (data.cronEnabled) {
-          alert('Cron está ACTIVO\n\nProgramación:\n• Precio/Stock: cada 15 min\n• Espejo: Lun-Vie 11am y 3pm (Venezuela)\n\nNota: Para desactivar, cambia CRON_ENABLED=false en las variables de entorno');
+          alert('Cron está ACTIVO\n\nProgramación:\n• Precio/Stock: cada 15 min\n• Espejo: Lun-Vie 11am y 3pm (Venezuela)\n\nNota: Para desactivar, vuelve a presionar el botón');
         } else {
-          alert('Cron está INACTIVO\n\nCausa: CRON_ENABLED=false en variables de entorno\n\nPara activar, cambia CRON_ENABLED=true en Railway');
+          alert('Cron está INACTIVO\n\nPara activar, vuelve a presionar el botón');
         }
         fetchStatus();
       } catch (err) {

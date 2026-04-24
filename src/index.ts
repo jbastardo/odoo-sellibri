@@ -60,7 +60,21 @@ app.post('/api/toggle', (_req, res) => {
   res.json({ success: true, apiEnabled, message: apiEnabled ? 'API encendida' : 'API apagada' });
 });
 
-// --- Toggle Cron on/off ---
+// --- Get Cron status (read-only) ---
+app.get('/api/cron/status', (_req, res) => {
+  res.json({ 
+    success: true, 
+    cronEnabled: cronEnabled, 
+    message: cronEnabled ? 'Cron habilitado' : 'Cron deshabilitado',
+    nextRuns: {
+      priceStock: 'En ~15 minutos',
+      mirror11am: 'Lun-Vie 11:00am (Venezuela)',
+      mirror3pm: 'Lun-Vie 3:00pm (Venezuela)'
+    }
+  });
+});
+
+// --- Toggle Cron on/off (manual trigger) ---
 app.post('/api/cron/toggle', (_req, res) => {
   cronEnabled = !cronEnabled;
   logger.info('api', `Cron ${cronEnabled ? 'habilitado' : 'deshabilitado'} manualmente`);
