@@ -20,6 +20,7 @@
       <p class="text-gray-400 mt-1">ONPROTEC — Espejo de productos
         <span class="ml-3 px-2 py-0.5 text-xs bg-green-900 text-green-300 rounded">Espejo: Lun-Vie 11am y 3pm</span>
         <span class="ml-1 px-2 py-0.5 text-xs bg-blue-900 text-blue-300 rounded">Precio/Stock: cada 15min</span>
+        <span id="cron-badge" class="ml-1 px-2 py-0.5 text-xs bg-gray-700 text-gray-300 rounded">Cron: Checking...</span>
       </p>
     </header>
 
@@ -79,6 +80,10 @@
       <button onclick="runDiagnostic()" id="btn-diagnostic"
         class="bg-cyan-600 hover:bg-cyan-700 text-white px-4 py-2 rounded-lg font-medium transition text-sm">
         🔍 Diagnóstico
+      </button>
+      <button onclick="toggleCron()" id="btn-cron"
+        class="bg-purple-600 hover:bg-purple-700 text-white px-4 py-2 rounded-lg font-medium transition text-sm">
+        ⏰ toggle Cron
       </button>
     </div>
 
@@ -188,6 +193,22 @@
           btnMirror.disabled = false;
           btnStock.disabled = false;
           btnAbort.classList.add('hidden');
+        }
+
+        // Fetch cron status
+        try {
+          const cronResp = await fetch('/api/cron/toggle', { method: 'POST' });
+          const cronData = await cronResp.json();
+          const badge = document.getElementById('cron-badge');
+          if (cronData.cronEnabled) {
+            badge.textContent = 'Cron: Activo';
+            badge.className = 'ml-1 px-2 py-0.5 text-xs bg-green-900 text-green-300 rounded';
+          } else {
+            badge.textContent = 'Cron: Inactivo';
+            badge.className = 'ml-1 px-2 py-0.5 text-xs bg-red-900 text-red-300 rounded';
+          }
+        } catch (e) {
+          document.getElementById('cron-badge').textContent = 'Cron: ?';
         }
 
         // Progress bar
@@ -329,6 +350,21 @@
           statusEl.className = 'text-lg font-bold mt-1 text-red-400';
         }
         setTimeout(fetchStatus, 2000);
+      } catch (err) {
+        alert('Error: ' + err.message);
+      }
+    }
+
+    async function toggleCron() {
+      try {
+        const resp = await fetch('/api/cron/toggle', { method: 'POST' });
+        const data = await resp.json();
+        if (data.cronEnabled) {
+          alert('Cron está ACTIVO\n\nProgramación:\n• Precio/Stock: cada 15 min\n• Espejo: Lun-Vie 11am y 3pm (Venezuela)\n\nNota: Para desactivar, cambia CRON_ENABLED=false en las variables de entorno');
+        } else {
+          alert('Cron está INACTIVO\n\nCausa: CRON_ENABLED=false en variables de entorno\n\nPara activar, cambia CRON_ENABLED=true en Railway');
+        }
+        fetchStatus();
       } catch (err) {
         alert('Error: ' + err.message);
       }

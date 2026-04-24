@@ -13,6 +13,7 @@ const app = express();
 // --- Manual action lock ----------------------------------------
 let manualActionRunning = false;
 let apiEnabled = true;
+let cronEnabled = config.cronEnabled;  // Runtime cron toggle (can be modified at runtime)
 
 function startManualAction(name: string): boolean {
   const status = getSyncStatus();
@@ -57,6 +58,23 @@ app.post('/api/toggle', (_req, res) => {
   apiEnabled = !apiEnabled;
   logger.info('api', `API ${apiEnabled ? 'encendida' : 'apagada'} manualmente`);
   res.json({ success: true, apiEnabled, message: apiEnabled ? 'API encendida' : 'API apagada' });
+});
+
+// --- Toggle Cron on/off ---
+app.post('/api/cron/toggle', (_req, res) => {
+  cronEnabled = !cronEnabled;
+  logger.info('api', `Cron ${cronEnabled ? 'habilitado' : 'deshabilitado'} manualmente`);
+  res.json({ 
+    success: true, 
+    cronEnabled, 
+    message: cronEnabled ? 'Cron habilitado' : 'Cron deshabilitado',
+    details: {
+      priceStock: '*/15 * * * * (cada 15 min)',
+      mirror11am: '0 11 * * 1-5 (Lun-Vie 11am)',
+      mirror3pm: '0 15 * * 1-5 (Lun-Vie 3pm)',
+      timezone: 'America/Caracas'
+    }
+  });
 });
 
 // --- Sync Espejo: full mirror (create + update + delete) ---
@@ -369,11 +387,13 @@ app.get('/health', (_req, res) => {
 
 // === Cron Jobs ===
 
+const CRON_JOBS_ACTIVE = cronEnabled;
+
 // Cron 1: Precio/Stock cada 15 min
 cron.schedule('*/15 * * * *', () => {
   logger.info('cron', 'Iniciando sync precio/stock...');
-  if (!config.cronEnabled) {
-    logger.info('cron', 'Cron precio/stock omitido -- Cron deshabilitado en config');
+  if (!CRON_JOBS_ACTIVE) {
+    logger.info('cron', 'Cron precio/stock omitido -- CRON deshabilitado en config (CRON_ENABLED=false)');
     return;
   }
   if (!apiEnabled) {
@@ -400,8 +420,8 @@ cron.schedule('*/15 * * * *', () => {
 // Cron 2: Sync Espejo a las 11:00 AM Venezuela lun-vie
 cron.schedule('0 11 * * 1-5', () => {
   logger.info('cron', 'Iniciando sync espejo 11am...');
-  if (!config.cronEnabled) {
-    logger.info('cron', 'Cron espejo 11am omitido -- Cron deshabilitado en config');
+  if (!CRON_JOBS_ACTIVE) {
+    logger.info('cron', 'Cron espejo 11am omitido -- CRON deshabilitado en config (CRON_ENABLED=false)');
     return;
   }
   if (!apiEnabled) {
@@ -428,8 +448,8 @@ cron.schedule('0 11 * * 1-5', () => {
 // Cron 3: Sync Espejo a las 3:00 PM Venezuela lun-vie
 cron.schedule('0 15 * * 1-5', () => {
   logger.info('cron', 'Iniciando sync espejo 3pm...');
-  if (!config.cronEnabled) {
-    logger.info('cron', 'Cron espejo 3pm omitido -- Cron deshabilitado en config');
+  if (!CRON_JOBS_ACTIVE) {
+    logger.info('cron', 'Cron espejo 3pm omitido -- CRON deshabilitado en config (CRON_ENABLED=false)');
     return;
   }
   if (!apiEnabled) {
@@ -453,28 +473,7 @@ cron.schedule('0 15 * * 1-5', () => {
   timezone: 'America/Caracas'
 });
 
-// OLD: Sync Espejo DESACTIVADO -- solo manual desde dashboard
-// cron.schedule('0 * * * *', () => {
-//   if (!apiEnabled) {
-//     logger.info('cron', 'Cron espejo omitido -- API apagada');
-//     return;
-//   }
-//   if (manualActionRunning) {
-//     logger.info('cron', 'Cron espejo omitido -- accion manual en curso');
-//     return;
-//   }
-//   const status = getSyncStatus();
-//   if (status.isRunning) {
-//     logger.info('cron', 'Cron espejo omitido -- sync en curso');
-//     return;
-//   }
-//   logger.info('cron', 'Cron: sync espejo (crear/actualizar/eliminar)');
-//   syncMirror().catch(err => {
-//     logger.error('cron', `Cron espejo error: ${err.message}`);
-//   });
-// });
-
-logger.info('server', 'Cron activo: precio/stock cada 15 min | espejo: 11am y 3pm lun-vie (Venezuela)');
+logger.info('server', `Cron activo: precio/stock cada 15 min | espejo: 11am y 3pm lun-vie (Venezuela) | CRON_ENABLED=${CRON_JOBS_ACTIVE}`);
 
 // === Start Server ===
 app.listen(config.port, () => {
