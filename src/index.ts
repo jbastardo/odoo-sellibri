@@ -13,7 +13,7 @@ const app = express();
 // --- Manual action lock ----------------------------------------
 let manualActionRunning = false;
 let apiEnabled = true;
-let cronEnabled = config.cronEnabled;  // Runtime cron toggle (can be modified at runtime)
+// Cron is controlled solely by CRON_ENABLED env var - no runtime toggle
 
 function startManualAction(name: string): boolean {
   const status = getSyncStatus();
@@ -64,30 +64,14 @@ app.post('/api/toggle', (_req, res) => {
 app.get('/api/cron/status', (_req, res) => {
   res.json({ 
     success: true, 
-    cronEnabled: cronEnabled, 
-    message: cronEnabled ? 'Cron habilitado' : 'Cron deshabilitado',
+    cronEnabled: config.cronEnabled, 
+    message: config.cronEnabled ? 'Cron habilitado ( CRON_ENABLED=true en env)' : 'Cron deshabilitado (CRON_ENABLED=false en env)',
     nextRuns: {
-      priceStock: 'En ~15 minutos',
+      priceStock: 'Cada 15 minutos',
       mirror11am: 'Lun-Vie 11:00am (Venezuela)',
       mirror3pm: 'Lun-Vie 3:00pm (Venezuela)'
-    }
-  });
-});
-
-// --- Toggle Cron on/off (manual trigger) ---
-app.post('/api/cron/toggle', (_req, res) => {
-  cronEnabled = !cronEnabled;
-  logger.info('api', `Cron ${cronEnabled ? 'habilitado' : 'deshabilitado'} manualmente`);
-  res.json({ 
-    success: true, 
-    cronEnabled, 
-    message: cronEnabled ? 'Cron habilitado' : 'Cron deshabilitado',
-    details: {
-      priceStock: '*/15 * * * * (cada 15 min)',
-      mirror11am: '0 11 * * 1-5 (Lun-Vie 11am)',
-      mirror3pm: '0 15 * * 1-5 (Lun-Vie 3pm)',
-      timezone: 'America/Caracas'
-    }
+    },
+    note: 'Para cambiar el estado, modifica la variable CRON_ENABLED en Railway'
   });
 });
 
@@ -401,7 +385,7 @@ app.get('/health', (_req, res) => {
 
 // === Cron Jobs ===
 
-const CRON_JOBS_ACTIVE = cronEnabled;
+const CRON_JOBS_ACTIVE = config.cronEnabled;
 
 // Cron 1: Precio/Stock cada 15 min
 cron.schedule('*/15 * * * *', () => {

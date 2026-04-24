@@ -81,10 +81,6 @@
         class="bg-cyan-600 hover:bg-cyan-700 text-white px-4 py-2 rounded-lg font-medium transition text-sm">
         🔍 Diagnóstico
       </button>
-      <button onclick="toggleCron()" id="btn-cron"
-        class="bg-purple-600 hover:bg-purple-700 text-white px-4 py-2 rounded-lg font-medium transition text-sm">
-        ⏰ toggle Cron
-      </button>
     </div>
 
     <!-- SKU Force Sync -->
@@ -350,21 +346,6 @@
           statusEl.className = 'text-lg font-bold mt-1 text-red-400';
         }
         setTimeout(fetchStatus, 2000);
-      } catch (err) {
-        alert('Error: ' + err.message);
-      }
-    }
-
-    async function toggleCron() {
-      try {
-        const resp = await fetch('/api/cron/toggle', { method: 'POST' });
-        const data = await resp.json();
-        if (data.cronEnabled) {
-          alert('Cron está ACTIVO\n\nProgramación:\n• Precio/Stock: cada 15 min\n• Espejo: Lun-Vie 11am y 3pm (Venezuela)\n\nNota: Para desactivar, vuelve a presionar el botón');
-        } else {
-          alert('Cron está INACTIVO\n\nPara activar, vuelve a presionar el botón');
-        }
-        fetchStatus();
       } catch (err) {
         alert('Error: ' + err.message);
       }
