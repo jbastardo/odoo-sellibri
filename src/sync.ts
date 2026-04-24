@@ -423,8 +423,9 @@ export interface MirrorSyncResult {
 }
 
 export async function syncMirror(): Promise<MirrorSyncResult> {
-  if (mirrorSyncRunning || stockSyncRunning) {
-    logger.warn(MODULE, 'Mirror sync: another sync is running, skipping');
+  // Mirror sync has PRIORITY - can run even if stock sync is running
+  if (mirrorSyncRunning) {
+    logger.warn(MODULE, 'Mirror sync already running, skipping');
     return { odooTotal: 0, sellibriTotal: 0, created: 0, updated: 0, unchanged: 0, deleted: 0, skippedInvalid: 0, errors: 0 };
   }
 
@@ -882,8 +883,16 @@ export async function restoreProduct(sku: string): Promise<{ success: boolean; m
 // ===============================================================
 
 export async function syncPriceStock(): Promise<void> {
+  // Price/Stock sync can be running concurrently with mirror
+  // But skip if:
+  // 1. Already running price/stock sync
+  // 2. Mirror sync is running (mirror has priority)
   if (stockSyncRunning) {
     logger.warn(MODULE, 'Price/Stock sync already running, skipping');
+    return;
+  }
+  if (mirrorSyncRunning) {
+    logger.warn(MODULE, 'Mirror sync running - price/stock sync skipped (mirror has priority)');
     return;
   }
 
