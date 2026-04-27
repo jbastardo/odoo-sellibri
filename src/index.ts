@@ -426,13 +426,13 @@ cron.schedule('0 11 * * 1-5', () => {
     logger.info('cron', 'Cron espejo 11am omitido -- API apagada');
     return;
   }
+const status = getSyncStatus();
+  if (status.isRunning) {
+    logger.info('cron', 'Abortando sync en curso para priorizar sync espejo 11am');
+    requestAbort();
+  }
   if (manualActionRunning) {
     logger.info('cron', 'Cron espejo 11am omitido -- accion manual en curso');
-    return;
-  }
-  const status = getSyncStatus();
-  if (status.isRunning) {
-    logger.info('cron', 'Cron espejo 11am omitido -- sync en curso');
     return;
   }
   logger.info('cron', 'Cron: sync espejo 11am (crear/actualizar/eliminar)');
@@ -454,13 +454,13 @@ cron.schedule('0 15 * * 1-5', () => {
     logger.info('cron', 'Cron espejo 3pm omitido -- API apagada');
     return;
   }
-  if (manualActionRunning) {
-    logger.info('cron', 'Cron espejo 3pm omitido -- accion manual en curso');
-    return;
-  }
   const status = getSyncStatus();
   if (status.isRunning) {
-    logger.info('cron', 'Cron espejo 3pm omitido -- sync en curso');
+    logger.info('cron', 'Abortando sync en curso para priorizar sync espejo 3pm');
+    requestAbort();
+  }
+  if (manualActionRunning) {
+    logger.info('cron', 'Cron espejo 3pm omitido -- accion manual en curso');
     return;
   }
   logger.info('cron', 'Cron: sync espejo 3pm (crear/actualizar/eliminar)');
