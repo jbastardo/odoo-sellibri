@@ -242,15 +242,44 @@ function isValidForSellibri(product: odoo.OdooProduct): boolean {
 
 // --- Image Builder ---
 
-function buildImagesPayload(odooProduct: odoo.OdooProduct, title: string): sellibri.SellibriImageAttribute[] {
-  const imageUrls = odoo.buildImageUrls(odooProduct);
+async function buildImagesPayload(odooProduct: odoo.OdooProduct, title: string): Promise<sellibri.SellibriImageAttribute[]> {
   const attrs: sellibri.SellibriImageAttribute[] = [];
-  if (imageUrls.mainUrl) {
-    attrs.push({ remote_url: imageUrls.mainUrl, position: 1, alt: title });
+  
+  try {
+    const mainImageB64 = await odoo.fetchProductMainImage(odooProduct.id);
+    if (mainImageB64) {
+      attrs.push({ 
+        attachment: `data:image/jpeg;base64,${mainImageB64}`, 
+        position: 1, 
+        alt: title 
+      });
+    }
+
+    if (odooProduct.product_template_image_ids && odooProduct.product_template_image_ids.length > 0) {
+      const extraImages = await odoo.fetchProductImages(odooProduct.product_template_image_ids);
+      for (let i = 0; i < extraImages.length; i++) {
+        const extra = extraImages[i];
+        if (extra.image_1920) {
+          attrs.push({
+            attachment: `data:image/jpeg;base64,${extra.image_1920}`,
+            position: i + 2,
+            alt: title
+          });
+        }
+      }
+    }
+  } catch (err: any) {
+    logger.warn(MODULE, `Error fetching Base64 images for ${odooProduct.default_code}: ${err.message}`);
+    // Fallback to URL method if base64 fails
+    const imageUrls = odoo.buildImageUrls(odooProduct);
+    if (imageUrls.mainUrl) {
+      attrs.push({ remote_url: imageUrls.mainUrl, position: 1, alt: title });
+    }
+    for (const extra of imageUrls.additionalUrls) {
+      attrs.push({ remote_url: extra.url, position: extra.position, alt: title });
+    }
   }
-  for (const extra of imageUrls.additionalUrls) {
-    attrs.push({ remote_url: extra.url, position: extra.position, alt: title });
-  }
+  
   return attrs;
 }
 
@@ -286,7 +315,7 @@ async function buildFullPayload(
   logger.info(MODULE, `buildFullPayload SKU=${odooProduct.default_code}: qty_available=${odooProduct.qty_available}, virtual_available=${odooProduct.virtual_available}, sending available=${Math.max(0, Math.floor((odooProduct.virtual_available !== undefined ? odooProduct.virtual_available : odooProduct.qty_available) || 0))}`);
 
   if (includeImages) {
-    const imagesAttrs = buildImagesPayload(odooProduct, title);
+    const imagesAttrs = await buildImagesPayload(odooProduct, title);
     if (imagesAttrs.length > 0) {
       masterAttrs.images_attributes = imagesAttrs;
     }
@@ -404,7 +433,7 @@ async function buildDiffPayload(
                               firstImageUrl === '';
 
   if (sellibriImages.length === 0 || isFirstImageInvalid) {
-    const imagesAttrs = buildImagesPayload(odooProduct, odooTitle);
+    const imagesAttrs = await buildImagesPayload(odooProduct, odooTitle);
     if (imagesAttrs.length > 0) {
       masterAttrs.images_attributes = imagesAttrs;
       needsUpdate = true;
