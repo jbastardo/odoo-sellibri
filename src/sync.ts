@@ -385,7 +385,14 @@ async function buildDiffPayload(
   }
 
   const sellibriImages = variant.images || [];
-  if (sellibriImages.length === 0) {
+  const firstImageUrl = sellibriImages.length > 0 ? (sellibriImages[0].url || '').toLowerCase() : '';
+  const isFirstImageInvalid = firstImageUrl.includes('missing') || 
+                              firstImageUrl.includes('default') || 
+                              firstImageUrl.includes('fallback') || 
+                              firstImageUrl.includes('placeholder') ||
+                              firstImageUrl === '';
+
+  if (sellibriImages.length === 0 || isFirstImageInvalid) {
     const imagesAttrs = buildImagesPayload(odooProduct, odooTitle);
     if (imagesAttrs.length > 0) {
       masterAttrs.images_attributes = imagesAttrs;
@@ -448,6 +455,7 @@ export async function syncMirror(): Promise<MirrorSyncResult> {
     };
 
     logger.info(MODULE, 'Mirror sync: loading Odoo products...');
+    odoo.clearTemplateCache();
     const odooProducts = await odoo.fetchAllProducts();
     result.odooTotal = odooProducts.length;
 
@@ -470,74 +478,78 @@ export async function syncMirror(): Promise<MirrorSyncResult> {
     const batchStartTime = Date.now();
     let processed = 0;
 
-    for (let i = 0; i < odooProducts.length; i++) {
-      if (abortRequested) break;
-      const product = odooProducts[i];
-      const sku = product.default_code;
-      if (!sku) { processed++; continue; }
+    const concurrency = 10;
+    const workers = Array.from({ length: concurrency }, async () => {
+      while (odooProducts.length > 0 && !abortRequested) {
+        const product = odooProducts.shift()!;
+        const sku = product.default_code;
+        if (!sku) { processed++; continue; }
 
-      if (!isValidForSellibri(product)) {
-        const price = product.price_with_tax || product.list_price;
-        const priceWithTax = product.price_with_tax;
-        const listPrice = product.list_price;
-        logger.warn(MODULE, `SKU=${sku}: skipped invalid -- price_with_tax=${priceWithTax}, list_price=${listPrice}, effective_price=${price}, has_name=${product.name ? 'yes' : 'no'}`);
-        result.skippedInvalid++;
+        if (!isValidForSellibri(product)) {
+          const price = product.price_with_tax || product.list_price;
+          const priceWithTax = product.price_with_tax;
+          const listPrice = product.list_price;
+          logger.warn(MODULE, `SKU=${sku}: skipped invalid -- price_with_tax=${priceWithTax}, list_price=${listPrice}, effective_price=${price}, has_name=${product.name ? 'yes' : 'no'}`);
+          result.skippedInvalid++;
+          processed++;
+          updateProgress(processed, totalWork, batchStartTime, 'Espejo:');
+          continue;
+        }
+
+        try {
+          const existing = sellibriCatalog.get(sku);
+          if (existing) {
+            const diffPayload = await buildDiffPayload(product, existing);
+            if (diffPayload) {
+              await sellibri.updateProduct(existing.id, diffPayload);
+              result.updated++;
+            } else {
+              result.unchanged++;
+            }
+            state.products[sku] = {
+              sellibriId: existing.id,
+              sellibriVariantId: existing.all_variants?.[0]?.id || 0,
+              odooWriteDate: product.write_date,
+              lastSynced: new Date().toISOString(),
+              lastStock: Math.max(0, Math.floor(product.virtual_available || product.qty_available || 0)),
+              lastPrice: getSellibriPrice(product),
+            };
+          } else {
+            const payload = await buildFullPayload(product, true);
+            logger.info(MODULE, `Creating SKU=${sku} title="${payload.product.title}" price=${payload.product.master_attributes?.price} stock=${payload.product.master_attributes?.stock_items_attributes?.[0]?.available}`);
+            const newProduct = await sellibri.createProduct(payload);
+            result.created++;
+            logger.info(MODULE, `Created SKU=${sku} (id=${newProduct.id})`);
+            state.products[sku] = {
+              sellibriId: newProduct.id,
+              sellibriVariantId: newProduct.all_variants?.[0]?.id || 0,
+              odooWriteDate: product.write_date,
+              lastSynced: new Date().toISOString(),
+              lastStock: Math.max(0, Math.floor(product.virtual_available || product.qty_available || 0)),
+              lastPrice: getSellibriPrice(product),
+            };
+          }
+        } catch (err: any) {
+          result.errors++;
+          const status = (err as any)?.response?.status;
+          const errData = (err as any)?.response?.data;
+          if (status === 400) {
+            logger.warn(MODULE, `SKU=${sku}: 400 Bad Request (skipped) - ${JSON.stringify(errData)?.substring(0, 500)}`);
+          } else {
+            logger.error(MODULE, `Error SKU=${sku}: ${err.message}`);
+          }
+        }
+
         processed++;
         updateProgress(processed, totalWork, batchStartTime, 'Espejo:');
-        continue;
-      }
-
-      try {
-        const existing = sellibriCatalog.get(sku);
-        if (existing) {
-          const diffPayload = await buildDiffPayload(product, existing);
-          if (diffPayload) {
-            await sellibri.updateProduct(existing.id, diffPayload);
-            result.updated++;
-          } else {
-            result.unchanged++;
-          }
-          state.products[sku] = {
-            sellibriId: existing.id,
-            sellibriVariantId: existing.all_variants?.[0]?.id || 0,
-            odooWriteDate: product.write_date,
-            lastSynced: new Date().toISOString(),
-            lastStock: Math.max(0, Math.floor(product.virtual_available || product.qty_available || 0)),
-            lastPrice: getSellibriPrice(product),
-          };
-        } else {
-          const payload = await buildFullPayload(product, true);
-          logger.info(MODULE, `Creating SKU=${sku} title="${payload.product.title}" price=${payload.product.master_attributes?.price} stock=${payload.product.master_attributes?.stock_items_attributes?.[0]?.available}`);
-          const newProduct = await sellibri.createProduct(payload);
-          result.created++;
-          logger.info(MODULE, `Created SKU=${sku} (id=${newProduct.id})`);
-          state.products[sku] = {
-            sellibriId: newProduct.id,
-            sellibriVariantId: newProduct.all_variants?.[0]?.id || 0,
-            odooWriteDate: product.write_date,
-            lastSynced: new Date().toISOString(),
-            lastStock: Math.max(0, Math.floor(product.virtual_available || product.qty_available || 0)),
-            lastPrice: getSellibriPrice(product),
-          };
-        }
-      } catch (err: any) {
-        result.errors++;
-        const status = (err as any)?.response?.status;
-        const errData = (err as any)?.response?.data;
-        if (status === 400) {
-          logger.warn(MODULE, `SKU=${sku}: 400 Bad Request (skipped) - ${JSON.stringify(errData)?.substring(0, 500)}`);
-        } else {
-          logger.error(MODULE, `Error SKU=${sku}: ${err.message}`);
+        if (processed % 100 === 0) {
+          saveState(state);
+          logger.info(MODULE, `Progress: ${processed}/${totalWork} (created=${result.created}, updated=${result.updated}, unchanged=${result.unchanged}, errors=${result.errors})`);
         }
       }
+    });
 
-      processed++;
-      updateProgress(processed, totalWork, batchStartTime, 'Espejo:');
-      if (processed % 100 === 0) {
-        saveState(state);
-        logger.info(MODULE, `Progress: ${processed}/${totalWork} (created=${result.created}, updated=${result.updated}, unchanged=${result.unchanged}, errors=${result.errors})`);
-      }
-    }
+    await Promise.all(workers);
 
     // Phase 3: Delete orphans
     // Only delete products that are NOT in Odoo AND were never synced before

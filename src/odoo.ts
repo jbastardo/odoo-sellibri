@@ -534,9 +534,22 @@ export async function fetchActiveCategories(): Promise<{ id: number; name: strin
       }
     }
 
-    /** Get product name from Odoo website (og:title). */
-    export async function fetchTemplateName(productTmplId: number, fallbackSku?: string): Promise<string | null> {
-      try {
+let templateNameCache = new Map<number, string | null>();
+let templateDescCache = new Map<number, string | null>();
+
+export function clearTemplateCache(): void {
+  templateNameCache.clear();
+  templateDescCache.clear();
+  logger.info(MODULE, 'Template cache cleared');
+}
+
+/** Get product name from Odoo website (og:title). */
+export async function fetchTemplateName(productTmplId: number, fallbackSku?: string): Promise<string | null> {
+  if (templateNameCache.has(productTmplId)) {
+    return templateNameCache.get(productTmplId) || null;
+  }
+  
+  try {
         const result = await execute('product.template', 'read', [[productTmplId]], {
           fields: ['default_code'],
         });
@@ -546,31 +559,42 @@ export async function fetchActiveCategories(): Promise<{ id: number; name: strin
           const websiteName = await fetchNameFromOdooWebsite(defaultCode);
           if (websiteName) {
             logger.info(MODULE, `fetchTemplateName(${productTmplId}): website name="${websiteName}"`);
+            templateNameCache.set(productTmplId, websiteName);
             return websiteName;
           }
         }
         
         logger.warn(MODULE, `fetchTemplateName(${productTmplId}): no website name found`);
+        templateNameCache.set(productTmplId, null);
         return null;
       } catch (err: any) {
         logger.warn(MODULE, `Failed to fetch template name for tmpl_id=${productTmplId}: ${err.message}`);
+        templateNameCache.set(productTmplId, null);
         return null;
       }
     }
 /** Fetch description from product.template for duplicated products.
  * Tries multiple description fields. */
 export async function fetchTemplateDescription(productTmplId: number): Promise<string | null> {
+  if (templateDescCache.has(productTmplId)) {
+    return templateDescCache.get(productTmplId) || null;
+  }
+  
   try {
     const result = await execute('product.template', 'read', [[productTmplId]], {
       fields: ['website_description', 'description', 'description_sale'],
     });
     if (result && result.length > 0) {
       const tmpl = result[0];
-      return tmpl.website_description || tmpl.description || tmpl.description_sale || null;
+      const desc = tmpl.website_description || tmpl.description || tmpl.description_sale || null;
+      templateDescCache.set(productTmplId, desc);
+      return desc;
     }
+    templateDescCache.set(productTmplId, null);
     return null;
   } catch (err: any) {
     logger.warn(MODULE, `Failed to fetch template description for tmpl_id=${productTmplId}: ${err.message}`);
+    templateDescCache.set(productTmplId, null);
     return null;
   }
 }
