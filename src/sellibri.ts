@@ -97,16 +97,30 @@ async function apiGet<T = any>(path: string, params?: Record<string, any>): Prom
 async function apiPost<T = any>(path: string, data: any): Promise<T> {
   return withRetry(async () => {
     await rateLimiter.waitForSlot();
-    const resp = await client.post(path, data);
-    return resp.data;
+    try {
+      const resp = await client.post(path, data);
+      return resp.data;
+    } catch (err: any) {
+      if (err.response && err.response.status === 422) {
+        logger.error(MODULE, `apiPost 422 on ${path}: ${JSON.stringify(err.response.data)}`);
+      }
+      throw err;
+    }
   });
 }
 
 async function apiPatch<T = any>(path: string, data: any): Promise<T> {
   return withRetry(async () => {
     await rateLimiter.waitForSlot();
-    const resp = await client.patch(path, data);
-    return resp.data;
+    try {
+      const resp = await client.patch(path, data);
+      return resp.data;
+    } catch (err: any) {
+      if (err.response && err.response.status === 422) {
+        logger.error(MODULE, `apiPatch 422 on ${path}: ${JSON.stringify(err.response.data)}`);
+      }
+      throw err;
+    }
   });
 }
 
