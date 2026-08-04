@@ -448,106 +448,7 @@ export async function fetchActiveCategories(): Promise<{ id: number; name: strin
   }
 
   return (cats as { id: number; name: string }[]).filter(c => usedIds.has(c.id));
-}
-
-
-/** Fetch name from Odoo website (og:title) */
-    let scrapeLock = Promise.resolve();
-
-    async function fetchNameFromOdooWebsite(sku: string): Promise<string | null> {
-      let releaseLock!: () => void;
-      const currentLock = scrapeLock;
-      scrapeLock = new Promise(resolve => { releaseLock = resolve; });
-      await currentLock;
-      
-      try {
-        await new Promise(r => setTimeout(r, 1000)); // Delay to prevent WAF blocks
-        let productUrl: string | null = null;
-        
-        // Get product from Odoo to find website_url
-        const products = await execute('product.product', 'search_read', [
-          [['default_code', '=', sku]],
-        ], { fields: ['website_url', 'product_tmpl_id'], limit: 1 });
-        
-        if (products && products.length > 0 && products[0].website_url) {
-          productUrl = products[0].website_url;
-        }
-        
-        // Fallback: search by SKU
-        if (!productUrl) {
-          const searchUrl = `${config.odoo.url}/shop?search=${sku}`;
-          const searchResp = await axios.get(searchUrl, {
-            timeout: 15000,
-            maxRedirects: 10,
-            headers: { 'User-Agent': 'Mozilla/5.0' },
-          });
-          const searchHtml = searchResp.data;
-          const linkMatch = searchHtml.match(new RegExp(`<a[^>]*href=["'](/shop/[^"']*${sku}[^"']*)["'][^>]*>`, 'i'));
-          if (linkMatch) productUrl = linkMatch[1];
-        }
-        
-        if (productUrl) {
-          if (productUrl.includes('error-message-this-request-was-blocked')) {
-            logger.warn(MODULE, `fetchNameFromOdooWebsite(${sku}): Odoo WAF block detected in URL. Skipping.`);
-            return null;
-          }
-
-          logger.info(MODULE, `fetchNameFromOdooWebsite(${sku}): url=${productUrl}`);
-          
-          const resp = await axios.get(`${config.odoo.url}${productUrl}`, {
-            timeout: 15000,
-            maxRedirects: 10,
-            headers: { 'User-Agent': 'Mozilla/5.0' },
-          });
-          
-          const html = resp.data;
-          const ogTitleMatch = html.match(/<meta[^>]*property=["']og:title["'][^>]*content=["']([^"']+)["']/i);
-          const metaTitleMatch = html.match(/<meta[^>]*name=["']default_title["'][^>]*content=["']([^"']+)["']/i);
-          const name = ogTitleMatch?.[1] || metaTitleMatch?.[1];
-          if (!name) return null;
-          
-          const normalized = name
-            .replace(/\s*\|\s*onprotec\s*$/i, '')
-            .replace(/&amp;/g, '&')
-            .replace(/&quot;/g, '"')
-            .replace(/&#34;/g, '"')
-            .replace(/&#39;/g, "'")
-            .replace(/&apos;/g, "'")
-            .replace(/&lt;/g, '<')
-            .replace(/&gt;/g, '>')
-            .replace(/&nbsp;/g, ' ')
-            .replace(/&iexcl;/g, '¡')
-            .replace(/&iquest;/g, '¿')
-            .replace(/&copy;/g, '(C)')
-            .replace(/&reg;/g, '(R)')
-            .replace(/&trade;/g, '(TM)')
-            .replace(/&deg;/g, ' grados')
-            .replace(/&ntilde;/g, 'ñ')
-            .replace(/&Ntilde;/g, 'Ñ')
-            .replace(/&aacute;/g, 'á')
-            .replace(/&eacute;/g, 'é')
-            .replace(/&iacute;/g, 'í')
-            .replace(/&oacute;/g, 'ó')
-            .replace(/&uacute;/g, 'ú')
-            .replace(/&Aacute;/g, 'Á')
-            .replace(/&Eacute;/g, 'É')
-            .replace(/&Iacute;/g, 'Í')
-            .replace(/&Oacute;/g, 'Ó')
-            .replace(/&Uacute;/g, 'Ú')
-            .replace(/\u00F1/g, 'ñ')
-            .replace(/\u00D1/g, 'Ñ')
-            .trim();
-          return normalized || null;
-        }
-        
-        return null;
-      } catch (err: any) {
-        logger.warn(MODULE, `fetchNameFromOdooWebsite error: ${err.message}`);
-        return null;
-      } finally {
-        releaseLock();
-      }
-    }
+}// Web scraping functions removed because they are too slow and trigger WAF
 
 let templateNameCache = new Map<number, string | null>();
 let templateDescCache = new Map<number, string | null>();
@@ -558,36 +459,43 @@ export function clearTemplateCache(): void {
   logger.info(MODULE, 'Template cache cleared');
 }
 
-/** Get product name from Odoo website (og:title). */
+/** Get product name from Odoo directly via API to avoid WAF blocks and latency. */
 export async function fetchTemplateName(productTmplId: number, fallbackSku?: string): Promise<string | null> {
   if (templateNameCache.has(productTmplId)) {
     return templateNameCache.get(productTmplId) || null;
   }
   
   try {
-        const result = await execute('product.template', 'read', [[productTmplId]], {
-          fields: ['default_code'],
-        });
-        const defaultCode = result?.[0]?.default_code || fallbackSku || '';
-        
-        if (defaultCode) {
-          const websiteName = await fetchNameFromOdooWebsite(defaultCode);
-          if (websiteName) {
-            logger.info(MODULE, `fetchTemplateName(${productTmplId}): website name="${websiteName}"`);
-            templateNameCache.set(productTmplId, websiteName);
-            return websiteName;
-          }
-        }
-        
-        logger.warn(MODULE, `fetchTemplateName(${productTmplId}): no website name found`);
-        templateNameCache.set(productTmplId, null);
-        return null;
-      } catch (err: any) {
-        logger.warn(MODULE, `Failed to fetch template name for tmpl_id=${productTmplId}: ${err.message}`);
-        templateNameCache.set(productTmplId, null);
-        return null;
+    const result = await execute('product.template', 'read', [[productTmplId]], {
+      fields: ['name', 'website_meta_title', 'display_name'],
+    });
+    
+    if (result && result.length > 0) {
+      const tmpl = result[0];
+      const apiName = tmpl.website_meta_title || tmpl.display_name || tmpl.name;
+      
+      if (apiName) {
+        // Basic normalization in case it contains simple HTML entities
+        const normalized = apiName
+          .replace(/&amp;/g, '&')
+          .replace(/&quot;/g, '"')
+          .replace(/&#34;/g, '"')
+          .trim();
+          
+        templateNameCache.set(productTmplId, normalized);
+        return normalized;
       }
     }
+    
+    templateNameCache.set(productTmplId, null);
+    return null;
+  } catch (err: any) {
+    logger.warn(MODULE, `Failed to fetch template name for tmpl_id=${productTmplId}: ${err.message}`);
+    templateNameCache.set(productTmplId, null);
+    return null;
+  }
+}
+
 /** Fetch description from product.template for duplicated products.
  * Tries multiple description fields. */
 export async function fetchTemplateDescription(productTmplId: number): Promise<string | null> {
@@ -795,3 +703,4 @@ export async function findProductName(sku: string): Promise<{ source: string; va
   
   return results;
 }
+export { execute };

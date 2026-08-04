@@ -1,0 +1,1 @@
+import { odoo } from './src/index.js'; setTimeout(async () => { try { const res = await odoo.execute('product.template', 'fields_get', []); console.log(Object.keys(res).filter(k => k.includes('name') || k.includes('title') || k.includes('web'))); process.exit(0); } catch(e) { console.error(e); process.exit(1); } }, 2000);

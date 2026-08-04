@@ -1,0 +1,1 @@
+import { execute } from "./src/odoo.ts"; async function run() { const fields = await execute("product.template", "fields_get", []); console.log(Object.keys(fields).filter(f => f.includes("name") || f.includes("title"))); } run();

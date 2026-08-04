@@ -1,0 +1,1 @@
+import { execute } from "./src/odoo.ts"; setTimeout(async () => { try { const res = await execute("product.template", "fields_get", []); console.log(Object.keys(res).filter(k => k.includes("name") || k.includes("title") || k.includes("web") || k.includes("seo"))); process.exit(0); } catch(e) { console.error(e); process.exit(1); } }, 2000);
