@@ -323,6 +323,7 @@ async function buildDiffPayload(
   const vendorId = mapBrandToVendor(odooProduct.brand_id);
 
   let needsUpdate = false;
+  const diffReasons: string[] = [];
   const productFields: Record<string, any> = {};
   const masterAttrs: sellibri.SellibriMasterAttributes = {
     sku: odooProduct.default_code,
@@ -330,11 +331,12 @@ async function buildDiffPayload(
     tax_rate_id: config.sellibri.taxRateId,
   };
 
-  if (sp.status !== 'active') { needsUpdate = true; }
+  if (sp.status !== 'active') { needsUpdate = true; diffReasons.push('status'); }
 
   if ((sp.title || '') !== odooTitle) {
     productFields.title = odooTitle;
     needsUpdate = true;
+    diffReasons.push('title');
   }
 
   // Description diff
@@ -342,6 +344,7 @@ async function buildDiffPayload(
   if (odooDescription && currentDescription !== odooDescription) {
     productFields.description = odooDescription;
     needsUpdate = true;
+    diffReasons.push('description');
   }
 
   const currentPrice = parseFloat(variant.price || '0');
@@ -349,6 +352,7 @@ async function buildDiffPayload(
   if (Math.abs(currentPrice - newPrice) > 0.01) {
     masterAttrs.price = odooPrice;
     needsUpdate = true;
+    diffReasons.push('price');
   }
 
   const currentStock = variant.stock_items?.[0]?.available ?? 0;
@@ -358,23 +362,29 @@ async function buildDiffPayload(
       available: odooStock,
     }];
     needsUpdate = true;
+    diffReasons.push('stock');
   }
 
   // Category diff - always compare
-  const currentTaxons = sp.taxon_ids || [];
-  if (!currentTaxons.includes(taxonId)) {
-    productFields.taxon_ids = [taxonId];
-    needsUpdate = true;
+  if (sp.taxon_ids !== undefined) {
+    const currentTaxons = sp.taxon_ids;
+    if (!currentTaxons.includes(taxonId)) {
+      productFields.taxon_ids = [taxonId];
+      needsUpdate = true;
+      diffReasons.push('taxon_ids');
+    }
   }
 
   if (vendorId && sp.product_vendor_id !== vendorId) {
     productFields.product_vendor_id = vendorId;
     needsUpdate = true;
+    diffReasons.push('vendor_id');
   }
 
   if (odooProduct.barcode && (variant.barcode || '') !== String(odooProduct.barcode)) {
     masterAttrs.barcode = odooProduct.barcode;
     needsUpdate = true;
+    diffReasons.push('barcode');
   }
 
   // Weight diff
@@ -382,6 +392,7 @@ async function buildDiffPayload(
   if (odooProduct.weight && Math.abs(currentWeight - odooProduct.weight) > 0.01) {
     masterAttrs.weight = odooProduct.weight;
     needsUpdate = true;
+    diffReasons.push('weight');
   }
 
   const sellibriImages = variant.images || [];
@@ -397,10 +408,15 @@ async function buildDiffPayload(
     if (imagesAttrs.length > 0) {
       masterAttrs.images_attributes = imagesAttrs;
       needsUpdate = true;
+      diffReasons.push('images');
     }
   }
 
   if (!needsUpdate) return null;
+  
+  if (diffReasons.length > 0) {
+    logger.info(MODULE, `Diff payload built for ${odooProduct.default_code}, reasons: ${diffReasons.join(', ')}`);
+  }
 
   return {
     product: {
