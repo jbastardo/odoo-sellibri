@@ -478,7 +478,7 @@ export async function syncMirror(): Promise<MirrorSyncResult> {
     const batchStartTime = Date.now();
     let processed = 0;
 
-    const concurrency = 10;
+    const concurrency = 3;
     const workers = Array.from({ length: concurrency }, async () => {
       while (odooProducts.length > 0 && !abortRequested) {
         const product = odooProducts.shift()!;
