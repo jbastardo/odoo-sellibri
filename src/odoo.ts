@@ -452,8 +452,16 @@ export async function fetchActiveCategories(): Promise<{ id: number; name: strin
 
 
 /** Fetch name from Odoo website (og:title) */
+    let scrapeLock = Promise.resolve();
+
     async function fetchNameFromOdooWebsite(sku: string): Promise<string | null> {
+      let releaseLock!: () => void;
+      const currentLock = scrapeLock;
+      scrapeLock = new Promise(resolve => { releaseLock = resolve; });
+      await currentLock;
+      
       try {
+        await new Promise(r => setTimeout(r, 1000)); // Delay to prevent WAF blocks
         let productUrl: string | null = null;
         
         // Get product from Odoo to find website_url
@@ -479,6 +487,11 @@ export async function fetchActiveCategories(): Promise<{ id: number; name: strin
         }
         
         if (productUrl) {
+          if (productUrl.includes('error-message-this-request-was-blocked')) {
+            logger.warn(MODULE, `fetchNameFromOdooWebsite(${sku}): Odoo WAF block detected in URL. Skipping.`);
+            return null;
+          }
+
           logger.info(MODULE, `fetchNameFromOdooWebsite(${sku}): url=${productUrl}`);
           
           const resp = await axios.get(`${config.odoo.url}${productUrl}`, {
@@ -531,6 +544,8 @@ export async function fetchActiveCategories(): Promise<{ id: number; name: strin
       } catch (err: any) {
         logger.warn(MODULE, `fetchNameFromOdooWebsite error: ${err.message}`);
         return null;
+      } finally {
+        releaseLock();
       }
     }
 
