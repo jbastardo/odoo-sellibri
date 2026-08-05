@@ -62,6 +62,39 @@ app.get('/api/logs/download', (_req, res) => {
   res.send(text);
 });
 
+// --- Image Proxy ---
+app.get('/api/images/:type/:id', async (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    const type = req.params.type;
+    let base64: string | null | false = null;
+    
+    if (type === 'template') {
+      const { fetchProductMainImage } = await import('./odoo');
+      base64 = await fetchProductMainImage(id);
+    } else if (type === 'extra') {
+      const { fetchProductImages } = await import('./odoo');
+      const images = await fetchProductImages([id]);
+      if (images.length > 0 && images[0].image_1920) {
+        base64 = images[0].image_1920;
+      }
+    }
+    
+    if (!base64) {
+      res.status(404).send('Image not found');
+      return;
+    }
+    
+    const buffer = Buffer.from(base64, 'base64');
+    res.setHeader('Content-Type', 'image/jpeg');
+    res.setHeader('Cache-Control', 'public, max-age=86400');
+    res.send(buffer);
+  } catch (err) {
+    logger.error('api', `Image proxy error: ${err}`);
+    res.status(500).send('Internal Server Error');
+  }
+});
+
 // --- Toggle API on/off ---
 app.post('/api/toggle', (_req, res) => {
   apiEnabled = !apiEnabled;

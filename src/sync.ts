@@ -253,38 +253,26 @@ async function buildImagesPayload(odooProduct: odoo.OdooProduct, title: string):
       ? odooProduct.product_tmpl_id[0] 
       : (odooProduct.product_tmpl_id as unknown as number);
     
-    logger.info(MODULE, `SKU=${odooProduct.default_code}: Fetching main image Base64 via XMLRPC (tmplId=${tmplId})...`);
-    const base64 = await odoo.fetchProductMainImage(tmplId);
-    
-    if (base64) {
-      // Odoo placeholder is around 8104 base64 chars (6KB). We assume anything very small 
-      // without actual content could be a placeholder, but we still upload it if they set it.
-      // However, to prevent overriding good images with Odoo's default placeholder, we can 
-      // check if it's exactly the placeholder. For now, we trust the XMLRPC data.
-      attrs.push({
-        attachment: `data:image/jpeg;base64,${base64}`,
-        position: currentPosition++,
-        alt: title
-      });
-      logger.info(MODULE, `SKU=${odooProduct.default_code}: Added main image (length=${base64.length})`);
-    } else {
-      logger.warn(MODULE, `SKU=${odooProduct.default_code}: Main image fetch returned null.`);
-    }
+    // We proxy the image through our own server to bypass Odoo's unauthenticated blocks
+    const proxyUrl = `${config.publicUrl}/api/images/template/${tmplId}`;
+    attrs.push({
+      remote_url: proxyUrl,
+      position: currentPosition++,
+      alt: title
+    });
+    logger.info(MODULE, `SKU=${odooProduct.default_code}: Added main image (proxy: ${proxyUrl})`);
   }
 
   if (imageUrls.additionalUrls.length > 0) {
     const extraIds = imageUrls.additionalUrls.map(u => u.id);
-    logger.info(MODULE, `SKU=${odooProduct.default_code}: Fetching ${extraIds.length} extra images via XMLRPC...`);
-    const extraImages = await odoo.fetchProductImages(extraIds);
-    for (const img of extraImages) {
-      if (img.image_1920) {
-        attrs.push({
-          attachment: `data:image/jpeg;base64,${img.image_1920}`,
-          position: currentPosition++,
-          alt: title
-        });
-        logger.info(MODULE, `SKU=${odooProduct.default_code}: Added extra image ${img.id} (length=${img.image_1920.length})`);
-      }
+    for (const id of extraIds) {
+      const proxyUrl = `${config.publicUrl}/api/images/extra/${id}`;
+      attrs.push({
+        remote_url: proxyUrl,
+        position: currentPosition++,
+        alt: title
+      });
+      logger.info(MODULE, `SKU=${odooProduct.default_code}: Added extra image ${id} (proxy: ${proxyUrl})`);
     }
   }
 

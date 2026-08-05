@@ -17,6 +17,7 @@ export const config = {
   ivaRate: parseFloat(process.env.IVA_RATE || '0.16'),
   port: parseInt(process.env.PORT || '3000', 10),
   cronEnabled: process.env.CRON_ENABLED !== 'false',
+  publicUrl: process.env.PUBLIC_URL || (process.env.RAILWAY_PUBLIC_DOMAIN ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}` : 'http://localhost:3000'),
   deleteProtectionSkus: (process.env.DELETE_PROTECTION_SKUS || '')
     .split(',')
     .map(s => s.trim())
