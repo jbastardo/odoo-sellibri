@@ -60,6 +60,15 @@ async function authenticate(): Promise<number> {
 async function execute(model: string, method: string, args: any[], kwargs: Record<string, any> = {}): Promise<any> {
   const uid = await authenticate();
   const client = createClient('/xmlrpc/2/object');
+  
+  // Force language to Spanish to avoid getting base English translations
+  const lang = process.env.ODOO_LANG || 'es_VE';
+  if (!kwargs.context) {
+    kwargs.context = { lang };
+  } else {
+    kwargs.context.lang = kwargs.context.lang || lang;
+  }
+  
   return call(client, 'execute_kw', [
     config.odoo.db,
     uid,
@@ -241,7 +250,6 @@ export function buildImageUrls(product: OdooProduct): OdooProductImageUrls {
     if (tmplId) {
       result.mainUrl = `${baseUrl}/web/image/product.template/${tmplId}/image_1920/${safeSku}_main.jpg`;
     } else {
-      // Fallback just in case
       result.mainUrl = `${baseUrl}/web/image/product.product/${product.id}/image_1920/${safeSku}_main.jpg`;
     }
   }
@@ -500,6 +508,7 @@ export async function fetchTemplateName(productTmplId: number, fallbackSku?: str
       const tmpl = result[0];
       // Prioritize tmpl.name. website_meta_title is often outdated when a product is duplicated.
       const apiName = tmpl.name || tmpl.display_name || tmpl.website_meta_title;
+      logger.info(MODULE, `Template fields: name="${tmpl.name}", display_name="${tmpl.display_name}", website_meta_title="${tmpl.website_meta_title}"`);
       
       // Save whether the template actually has a main image
       templateHasImageCache.set(productTmplId, !!tmpl.image_1920);
