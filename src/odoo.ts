@@ -96,6 +96,7 @@ export interface OdooProduct {
   description_sale: string | false;
   website_description: string | false;
   image_1920: string | boolean;
+  image_128?: string | boolean;
   product_tmpl_id: [number, string] | false;
   product_template_image_ids: number[];
   product_variant_image_ids?: number[];
