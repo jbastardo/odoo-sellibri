@@ -244,21 +244,50 @@ function isValidForSellibri(product: odoo.OdooProduct): boolean {
 async function buildImagesPayload(odooProduct: odoo.OdooProduct, title: string): Promise<sellibri.SellibriImageAttribute[]> {
   const imageUrls = odoo.buildImageUrls(odooProduct);
   const attrs: sellibri.SellibriImageAttribute[] = [];
-  
-  let mainUrlIsValid = !!imageUrls.mainUrl;
-  
-  // Removed unauthenticated axios.head check because Odoo returns placeholder.png for 
-  // valid but unpublished products, causing us to incorrectly skip real images.
-  logger.info(MODULE, `SKU=${odooProduct.default_code}: Image diagnostics: hasMainImage=${!!odooProduct.image_128} mainUrlIsValid=${mainUrlIsValid} extraUrls=${imageUrls.additionalUrls.length}`);
+  let currentPosition = 1;
 
-  if (mainUrlIsValid && imageUrls.mainUrl) {
-    attrs.push({ remote_url: imageUrls.mainUrl, position: 1, alt: title });
-  }
+  const hasMainImage = !!odooProduct.image_128;
   
-  let currentPosition = attrs.length > 0 ? 2 : 1;
-  for (const extra of imageUrls.additionalUrls) {
-    attrs.push({ remote_url: extra.url, position: currentPosition++, alt: title });
+  if (hasMainImage && odooProduct.product_tmpl_id) {
+    const tmplId = Array.isArray(odooProduct.product_tmpl_id) 
+      ? odooProduct.product_tmpl_id[0] 
+      : (odooProduct.product_tmpl_id as unknown as number);
+    
+    logger.info(MODULE, `SKU=${odooProduct.default_code}: Fetching main image Base64 via XMLRPC (tmplId=${tmplId})...`);
+    const base64 = await odoo.fetchProductMainImage(tmplId);
+    
+    if (base64) {
+      // Odoo placeholder is around 8104 base64 chars (6KB). We assume anything very small 
+      // without actual content could be a placeholder, but we still upload it if they set it.
+      // However, to prevent overriding good images with Odoo's default placeholder, we can 
+      // check if it's exactly the placeholder. For now, we trust the XMLRPC data.
+      attrs.push({
+        attachment: `data:image/jpeg;base64,${base64}`,
+        position: currentPosition++,
+        alt: title
+      });
+      logger.info(MODULE, `SKU=${odooProduct.default_code}: Added main image (length=${base64.length})`);
+    } else {
+      logger.warn(MODULE, `SKU=${odooProduct.default_code}: Main image fetch returned null.`);
+    }
   }
+
+  if (imageUrls.additionalUrls.length > 0) {
+    const extraIds = imageUrls.additionalUrls.map(u => u.id);
+    logger.info(MODULE, `SKU=${odooProduct.default_code}: Fetching ${extraIds.length} extra images via XMLRPC...`);
+    const extraImages = await odoo.fetchProductImages(extraIds);
+    for (const img of extraImages) {
+      if (img.image_1920) {
+        attrs.push({
+          attachment: `data:image/jpeg;base64,${img.image_1920}`,
+          position: currentPosition++,
+          alt: title
+        });
+        logger.info(MODULE, `SKU=${odooProduct.default_code}: Added extra image ${img.id} (length=${img.image_1920.length})`);
+      }
+    }
+  }
+
   return attrs;
 }
 

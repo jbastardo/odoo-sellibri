@@ -136,7 +136,7 @@ async function apiDelete<T = any>(path: string): Promise<T> {
 
 export interface SellibriImageAttribute {
   remote_url?: string;
-  base64_data?: string;
+  attachment?: string;
   position?: number;
   alt?: string;
 }
