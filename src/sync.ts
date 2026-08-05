@@ -249,7 +249,7 @@ async function buildImagesPayload(odooProduct: odoo.OdooProduct, title: string):
     const mainImageB64 = await odoo.fetchProductMainImage(odooProduct.id);
     if (mainImageB64) {
       attrs.push({ 
-        attachment: `data:image/jpeg;base64,${mainImageB64}`, 
+        image: `data:image/jpeg;base64,${mainImageB64}`, 
         position: 1, 
         alt: title 
       });
@@ -261,7 +261,7 @@ async function buildImagesPayload(odooProduct: odoo.OdooProduct, title: string):
         const extra = extraImages[i];
         if (extra.image_1920) {
           attrs.push({
-            attachment: `data:image/jpeg;base64,${extra.image_1920}`,
+            image: `data:image/jpeg;base64,${extra.image_1920}`,
             position: i + 2,
             alt: title
           });
