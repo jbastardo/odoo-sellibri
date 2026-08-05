@@ -287,10 +287,10 @@ async function buildFullPayload(
 
   if (includeImages) {
     const imagesAttrs = buildImagesPayload(odooProduct, title);
-    logger.info(MODULE, `buildFullPayload SKU=${odooProduct.default_code}: has_main_image=${imagesAttrs.length > 0 && imagesAttrs[0].remote_url.includes('_main.jpg')}`);
+    logger.info(MODULE, `buildFullPayload SKU=${odooProduct.default_code}: has_main_image=${imagesAttrs.length > 0 && !!imagesAttrs[0]?.remote_url?.includes('_main.jpg')}`);
     if (imagesAttrs.length > 0) {
       masterAttrs.images_attributes = imagesAttrs;
-      logger.info(MODULE, `buildFullPayload SKU=${odooProduct.default_code}: Sending ${imagesAttrs.length} images (main: ${imagesAttrs[0].remote_url})`);
+      logger.info(MODULE, `buildFullPayload SKU=${odooProduct.default_code}: Sending ${imagesAttrs.length} images (main: ${imagesAttrs[0]?.remote_url})`);
     } else {
       logger.info(MODULE, `buildFullPayload SKU=${odooProduct.default_code}: No images to send`);
     }
