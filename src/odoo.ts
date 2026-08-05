@@ -247,9 +247,9 @@ export function buildImageUrls(product: OdooProduct): OdooProductImageUrls {
   const hasMainImage = !!product.image_128;
 
   if (hasMainImage) {
-    // We always point to product.product so we get the correct variant image if it was overridden,
-    // otherwise Odoo gracefully falls back to the template image anyway.
-    result.mainUrl = `${baseUrl}/web/image/product.product/${product.id}/image_1920/${safeSku}_main.jpg`;
+    // We point to product.template because when a product is duplicated, product.product 
+    // often retains the old image, while the user updates the product.template.
+    result.mainUrl = `${baseUrl}/web/image/product.template/${tmplId}/image_1920/${safeSku}_main.jpg`;
   }
 
   // Additional images from product.image model

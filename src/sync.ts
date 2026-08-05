@@ -245,21 +245,10 @@ async function buildImagesPayload(odooProduct: odoo.OdooProduct, title: string):
   const imageUrls = odoo.buildImageUrls(odooProduct);
   const attrs: sellibri.SellibriImageAttribute[] = [];
   
-  let mainUrlIsValid = false;
-  if (imageUrls.mainUrl) {
-    try {
-      const res = await axios.head(imageUrls.mainUrl, { validateStatus: () => true });
-      const disposition = res.headers['content-disposition'] || '';
-      if (!disposition.includes('placeholder.png') && res.status === 200) {
-        mainUrlIsValid = true;
-      } else {
-        logger.warn(MODULE, `SKU=${odooProduct.default_code}: mainUrl is a placeholder, skipping it.`);
-      }
-    } catch (e) {
-      logger.warn(MODULE, `SKU=${odooProduct.default_code}: Failed to verify mainUrl: ${e}`);
-    }
-  }
-
+  let mainUrlIsValid = !!imageUrls.mainUrl;
+  
+  // Removed unauthenticated axios.head check because Odoo returns placeholder.png for 
+  // valid but unpublished products, causing us to incorrectly skip real images.
   logger.info(MODULE, `SKU=${odooProduct.default_code}: Image diagnostics: hasMainImage=${!!odooProduct.image_128} mainUrlIsValid=${mainUrlIsValid} extraUrls=${imageUrls.additionalUrls.length}`);
 
   if (mainUrlIsValid && imageUrls.mainUrl) {
