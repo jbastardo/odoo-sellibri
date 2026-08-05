@@ -86,8 +86,7 @@ export interface OdooProduct {
   brand_id: [number, string] | false;
   description_sale: string | false;
   website_description: string | false;
-  image_1920: string | false;
-  image_128?: string | boolean;
+  image_1920: string | boolean;
   product_tmpl_id: [number, string] | false;
   product_template_image_ids: number[];
   product_variant_image_ids?: number[];
@@ -119,17 +118,17 @@ export async function fetchProducts(
   }
 
   // NOTE: Do NOT include image_1920 here — it causes OOM with thousands of products.
-  // Images are fetched individually per-product in fetchProductMainImage().
   const products = await execute('product.product', 'search_read', [domain], {
     fields: [
       'name', 'default_code', 'list_price', 'price_with_tax', 'qty_available', 'virtual_available', 'free_qty', 'weight',
       'barcode', 'categ_id', 'brand_id', 'description_sale',
       'website_description', 'product_tmpl_id', 'product_template_image_ids', 'product_variant_image_ids',
-      'write_date', 'sale_ok', 'type', 'image_128'
+      'write_date', 'sale_ok', 'type', 'image_1920'
     ],
     offset,
     limit,
     order: 'write_date asc, id asc',
+    context: { bin_size: true }
   });
 
   return products as OdooProduct[];
@@ -234,8 +233,9 @@ export function buildImageUrls(product: OdooProduct): OdooProductImageUrls {
 
   const safeSku = encodeURIComponent(product.default_code.replace(/[^a-zA-Z0-9_-]/g, '_'));
 
-  // We check if image_128 is truthy (Odoo returns false if the product has NO image)
-  if (product.image_128) {
+  // We check if image_1920 is truthy (Odoo returns false if the product has NO image)
+  // Because we used context: { bin_size: true }, image_1920 will be the file size (e.g. "45 Kb") instead of huge base64
+  if (product.image_1920) {
     if (tmplId) {
       result.mainUrl = `${baseUrl}/web/image/product.template/${tmplId}/image_1920/${safeSku}_main.jpg`;
     } else {

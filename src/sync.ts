@@ -286,7 +286,7 @@ async function buildFullPayload(
   logger.info(MODULE, `buildFullPayload SKU=${odooProduct.default_code}: qty_available=${odooProduct.qty_available}, virtual_available=${odooProduct.virtual_available}, sending available=${Math.max(0, Math.floor((odooProduct.virtual_available !== undefined ? odooProduct.virtual_available : odooProduct.qty_available) || 0))}`);
 
   if (includeImages) {
-    logger.info(MODULE, `buildFullPayload SKU=${odooProduct.default_code}: image_128 is ${odooProduct.image_128 ? 'TRUTHY' : 'FALSY'} (value: ${typeof odooProduct.image_128 === 'string' ? odooProduct.image_128.substring(0, 20) + '...' : odooProduct.image_128})`);
+    logger.info(MODULE, `buildFullPayload SKU=${odooProduct.default_code}: image_1920 is ${odooProduct.image_1920 ? 'TRUTHY' : 'FALSY'} (value: ${typeof odooProduct.image_1920 === 'string' ? odooProduct.image_1920.substring(0, 20) : odooProduct.image_1920})`);
     const imagesAttrs = buildImagesPayload(odooProduct, title);
     if (imagesAttrs.length > 0) {
       masterAttrs.images_attributes = imagesAttrs;
