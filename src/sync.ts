@@ -430,6 +430,14 @@ async function buildDiffPayload(
     const imagesAttrs = await buildImagesPayload(odooProduct, odooTitle);
     if (imagesAttrs.length > 0) {
       masterAttrs.images_attributes = imagesAttrs;
+      
+      // Also destroy any existing images so they don't accumulate
+      if (sellibriImages.length > 0) {
+        sellibriImages.forEach((img: any) => {
+          masterAttrs.images_attributes!.push({ id: img.id, _destroy: true } as any);
+        });
+      }
+      
       needsUpdate = true;
       diffReasons.push('images');
     }
@@ -842,18 +850,40 @@ export async function syncSingleSku(sku: string): Promise<{ success: boolean; me
       }
     }
 
+    let sellibriId: number;
+    let variantId: number;
+    let imagesCount = 0;
+
     if (existingProduct) {
-      logger.info(MODULE, `SKU=${sku}: deleting existing id=${existingProduct.id}`);
-      await sellibri.deleteProduct(existingProduct.id, sku);
+      logger.info(MODULE, `SKU=${sku}: updating existing id=${existingProduct.id} (clearing old images)`);
+      
+      const payload = await buildFullPayload(odooProduct, true);
+      payload.product.title = title;
+      
+      const oldImages = existingProduct.all_variants?.[0]?.images || [];
+      if (oldImages.length > 0) {
+        if (!payload.product.master_attributes!.images_attributes) {
+          payload.product.master_attributes!.images_attributes = [];
+        }
+        oldImages.forEach((img: any) => {
+          payload.product.master_attributes!.images_attributes!.push({ id: img.id, _destroy: true } as any);
+        });
+      }
+      
+      const updatedProduct = await sellibri.updateProduct(existingProduct.id, payload);
+      sellibriId = updatedProduct.id;
+      variantId = updatedProduct.all_variants?.[0]?.id || 0;
+      imagesCount = (updatedProduct.all_variants?.[0]?.images || []).length;
+      logger.info(MODULE, `SKU=${sku}: updated id=${sellibriId} title="${title}"`);
+    } else {
+      const payload = await buildFullPayload(odooProduct, true);
+      payload.product.title = title;
+      const newProduct = await sellibri.createProduct(payload);
+      sellibriId = newProduct.id;
+      variantId = newProduct.all_variants?.[0]?.id || 0;
+      imagesCount = (newProduct.all_variants?.[0]?.images || []).length;
+      logger.info(MODULE, `SKU=${sku}: created id=${sellibriId} title="${title}"`);
     }
-
-    const payload = await buildFullPayload(odooProduct, true);
-    payload.product.title = title;
-    const newProduct = await sellibri.createProduct(payload);
-    const sellibriId = newProduct.id;
-    const variantId = newProduct.all_variants?.[0]?.id || 0;
-
-    logger.info(MODULE, `SKU=${sku}: created id=${sellibriId} title="${title}"`);
 
     const state = loadState();
     state.products[sku] = {
@@ -866,10 +896,9 @@ export async function syncSingleSku(sku: string): Promise<{ success: boolean; me
     };
     saveState(state);
 
-    const imagesCount = (newProduct.all_variants?.[0]?.images || []).length;
     return {
       success: true,
-      message: `SKU ${sku} ${existingProduct ? 'recreado' : 'creado'} -- "${title}"${imagesCount > 0 ? ` + ${imagesCount} imagenes` : ''}`,
+      message: `SKU ${sku} ${existingProduct ? 'actualizado' : 'creado'} -- "${title}"${imagesCount > 0 ? ` + ${imagesCount} imagenes` : ''}`,
     };
   } catch (err: any) {
     logger.error(MODULE, `Actualizar SKU=${sku} failed: ${err.message}`);
