@@ -132,12 +132,11 @@ export async function fetchProducts(
       'name', 'default_code', 'list_price', 'price_with_tax', 'qty_available', 'virtual_available', 'free_qty', 'weight',
       'barcode', 'categ_id', 'brand_id', 'description_sale',
       'website_description', 'product_tmpl_id', 'product_template_image_ids', 'product_variant_image_ids',
-      'write_date', 'sale_ok', 'type', 'image_1920'
+      'write_date', 'sale_ok', 'type', 'image_128'
     ],
     offset,
     limit,
     order: 'write_date asc, id asc',
-    context: { bin_size: true }
   });
 
   return products as OdooProduct[];
@@ -242,10 +241,9 @@ export function buildImageUrls(product: OdooProduct): OdooProductImageUrls {
 
   const safeSku = encodeURIComponent(product.default_code.replace(/[^a-zA-Z0-9_-]/g, '_'));
 
-  // Since fetchProducts now uses bin_size: true, product.image_1920 is truthy if the product HAS an image.
-  // In Odoo, product.product.image_1920 inherits from product.template.image_1920 automatically.
-  // Therefore, if product.image_1920 is truthy, the variant (or its template) HAS an image!
-  const hasMainImage = !!product.image_1920;
+  // We fetch image_128 without bin_size because Odoo 16 computes placeholder size dynamically,
+  // making bin_size return truthy even for placeholders. image_128 returns false if missing.
+  const hasMainImage = !!product.image_128;
 
   if (hasMainImage) {
     // We always point to product.product so we get the correct variant image if it was overridden,
@@ -291,13 +289,13 @@ export async function fetchTemplateImageIds(templateId: number): Promise<number[
   return [];
 }
 
-/** Check if a product has a real main image (not a placeholder) by checking image_1920 field */
+/** Check if a product has a real main image (not a placeholder) by checking image_128 field */
 export async function productHasImage(productId: number): Promise<boolean> {
   try {
     const result = await execute('product.product', 'read', [[productId]], {
-      fields: ['image_1920'],
+      fields: ['image_128'],
     });
-    return !!(result && result[0] && result[0].image_1920);
+    return !!(result && result[0] && result[0].image_128);
   } catch {
     return false;
   }
@@ -361,10 +359,9 @@ export async function fetchProductBySku(sku: string): Promise<OdooProduct | null
       'name', 'default_code', 'list_price', 'price_with_tax', 'qty_available', 'virtual_available', 'free_qty', 'weight',
       'barcode', 'categ_id', 'brand_id', 'description_sale',
       'website_description', 'product_tmpl_id', 'product_template_image_ids', 'product_variant_image_ids',
-      'write_date', 'sale_ok', 'type', 'image_1920'
+      'write_date', 'sale_ok', 'type', 'image_128'
     ],
     limit: 1,
-    context: { bin_size: true },
   });
   if (products && products.length > 0) return products[0] as OdooProduct;
   return null;
