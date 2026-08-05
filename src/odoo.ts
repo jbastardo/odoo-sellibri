@@ -87,6 +87,7 @@ export interface OdooProduct {
   description_sale: string | false;
   website_description: string | false;
   image_1920: string | false;
+  image_128?: string | boolean;
   product_tmpl_id: [number, string] | false;
   product_template_image_ids: number[];
   write_date: string;
@@ -123,7 +124,7 @@ export async function fetchProducts(
       'name', 'default_code', 'list_price', 'price_with_tax', 'qty_available', 'virtual_available', 'free_qty', 'weight',
       'barcode', 'categ_id', 'brand_id', 'description_sale',
       'website_description', 'product_tmpl_id', 'product_template_image_ids',
-      'write_date', 'sale_ok', 'type',
+      'write_date', 'sale_ok', 'type', 'image_128'
     ],
     offset,
     limit,
@@ -230,11 +231,14 @@ export function buildImageUrls(product: OdooProduct): OdooProductImageUrls {
     ? product.product_tmpl_id[0] 
     : product.product_tmpl_id;
 
-  if (tmplId) {
-    result.mainUrl = `${baseUrl}/web/image/product.template/${tmplId}/image_1920`;
-  } else {
-    // Fallback just in case
-    result.mainUrl = `${baseUrl}/web/image/product.product/${product.id}/image_1920`;
+  // We check if image_128 is truthy (Odoo returns false if the product has NO image)
+  if (product.image_128) {
+    if (tmplId) {
+      result.mainUrl = `${baseUrl}/web/image/product.template/${tmplId}/image_1920`;
+    } else {
+      // Fallback just in case
+      result.mainUrl = `${baseUrl}/web/image/product.product/${product.id}/image_1920`;
+    }
   }
 
   // Additional images from product.image model
