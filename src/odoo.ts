@@ -233,9 +233,11 @@ export function buildImageUrls(product: OdooProduct): OdooProductImageUrls {
 
   const safeSku = encodeURIComponent(product.default_code.replace(/[^a-zA-Z0-9_-]/g, '_'));
 
-  // We check if image_1920 is truthy (Odoo returns false if the product has NO image)
-  // Because we used context: { bin_size: true }, image_1920 will be the file size (e.g. "45 Kb") instead of huge base64
-  if (product.image_1920) {
+  // We check if image_1920 is truthy on the variant OR if the template has an image cached
+  const tmplHasImage = tmplId ? templateHasImageCache.get(tmplId as number) : false;
+  const hasMainImage = !!product.image_1920 || tmplHasImage;
+
+  if (hasMainImage) {
     if (tmplId) {
       result.mainUrl = `${baseUrl}/web/image/product.template/${tmplId}/image_1920/${safeSku}_main.jpg`;
     } else {
@@ -473,10 +475,12 @@ export async function fetchActiveCategories(): Promise<{ id: number; name: strin
 
 let templateNameCache = new Map<number, string | null>();
 let templateDescCache = new Map<number, string | null>();
+let templateHasImageCache = new Map<number, boolean>();
 
 export function clearTemplateCache(): void {
   templateNameCache.clear();
   templateDescCache.clear();
+  templateHasImageCache.clear();
   logger.info(MODULE, 'Template cache cleared');
 }
 
@@ -488,12 +492,17 @@ export async function fetchTemplateName(productTmplId: number, fallbackSku?: str
   
   try {
     const result = await execute('product.template', 'read', [[productTmplId]], {
-      fields: ['name', 'website_meta_title', 'display_name'],
+      fields: ['name', 'website_meta_title', 'display_name', 'image_1920'],
+      context: { bin_size: true }
     });
     
     if (result && result.length > 0) {
       const tmpl = result[0];
-      const apiName = tmpl.website_meta_title || tmpl.display_name || tmpl.name;
+      // Prioritize tmpl.name. website_meta_title is often outdated when a product is duplicated.
+      const apiName = tmpl.name || tmpl.display_name || tmpl.website_meta_title;
+      
+      // Save whether the template actually has a main image
+      templateHasImageCache.set(productTmplId, !!tmpl.image_1920);
       
       if (apiName) {
         // Basic normalization in case it contains simple HTML entities
