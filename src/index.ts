@@ -53,6 +53,15 @@ app.get('/api/status', (_req, res) => {
   });
 });
 
+// --- Download all logs ---
+app.get('/api/logs/download', (_req, res) => {
+  const logs = logger.getLogs(500);
+  const text = logs.map(l => `[${l.timestamp}] [${l.level.toUpperCase()}] [${l.module}] ${l.message}`).join('\n');
+  res.setHeader('Content-disposition', 'attachment; filename=odoo-sellibri-logs.txt');
+  res.setHeader('Content-type', 'text/plain');
+  res.send(text);
+});
+
 // --- Toggle API on/off ---
 app.post('/api/toggle', (_req, res) => {
   apiEnabled = !apiEnabled;

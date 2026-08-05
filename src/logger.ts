@@ -8,9 +8,17 @@ export interface LogEntry {
 const MAX_LOG_ENTRIES = 500;
 const logBuffer: LogEntry[] = [];
 
+function getCaracasTimestamp(): string {
+  try {
+    return new Date().toLocaleString('sv-SE', { timeZone: 'America/Caracas' }).replace(' ', 'T') + '-04:00';
+  } catch (e) {
+    return new Date().toISOString();
+  }
+}
+
 function addLog(level: LogEntry['level'], module: string, message: string): void {
   const entry: LogEntry = {
-    timestamp: new Date().toISOString(),
+    timestamp: getCaracasTimestamp(),
     level,
     module,
     message,

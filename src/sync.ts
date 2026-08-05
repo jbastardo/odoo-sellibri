@@ -242,6 +242,7 @@ function isValidForSellibri(product: odoo.OdooProduct): boolean {
 
 function buildImagesPayload(odooProduct: odoo.OdooProduct, title: string): sellibri.SellibriImageAttribute[] {
   const imageUrls = odoo.buildImageUrls(odooProduct);
+  logger.info(MODULE, `SKU=${odooProduct.default_code}: Image diagnostics: hasMainImage=${!!odooProduct.image_1920} mainUrl=${imageUrls.mainUrl} extraUrls=${imageUrls.additionalUrls.length}`);
   const attrs: sellibri.SellibriImageAttribute[] = [];
   if (imageUrls.mainUrl) {
     attrs.push({ remote_url: imageUrls.mainUrl, position: 1, alt: title });
