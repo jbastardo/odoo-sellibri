@@ -192,11 +192,8 @@ function cleanName(name: string): string {
 }
 
 async function getProductTitle(product: odoo.OdooProduct): Promise<string> {
-  if (product.product_tmpl_id && Array.isArray(product.product_tmpl_id)) {
-    const tmplName = await odoo.fetchTemplateName(product.product_tmpl_id[0], product.default_code);
-    logger.info(MODULE, `Title diagnostics SKU=${product.default_code}: product.name="${product.name}", tmplName="${tmplName}"`);
-    if (tmplName) return cleanName(tmplName);
-  }
+  // Since we fetch with context: { lang: 'es_VE' }, product.name is always the fully translated name!
+  // No need to query product.template for the title anymore.
   return cleanName(product.name);
 }
 

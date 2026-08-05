@@ -242,16 +242,15 @@ export function buildImageUrls(product: OdooProduct): OdooProductImageUrls {
 
   const safeSku = encodeURIComponent(product.default_code.replace(/[^a-zA-Z0-9_-]/g, '_'));
 
-  // We check if image_1920 is truthy on the variant OR if the template has an image cached
-  const tmplHasImage = tmplId ? templateHasImageCache.get(tmplId as number) : false;
-  const hasMainImage = !!product.image_1920 || tmplHasImage;
+  // Since fetchProducts now uses bin_size: true, product.image_1920 is truthy if the product HAS an image.
+  // In Odoo, product.product.image_1920 inherits from product.template.image_1920 automatically.
+  // Therefore, if product.image_1920 is truthy, the variant (or its template) HAS an image!
+  const hasMainImage = !!product.image_1920;
 
   if (hasMainImage) {
-    if (tmplId) {
-      result.mainUrl = `${baseUrl}/web/image/product.template/${tmplId}/image_1920/${safeSku}_main.jpg`;
-    } else {
-      result.mainUrl = `${baseUrl}/web/image/product.product/${product.id}/image_1920/${safeSku}_main.jpg`;
-    }
+    // We always point to product.product so we get the correct variant image if it was overridden,
+    // otherwise Odoo gracefully falls back to the template image anyway.
+    result.mainUrl = `${baseUrl}/web/image/product.product/${product.id}/image_1920/${safeSku}_main.jpg`;
   }
 
   // Additional images from product.image model
@@ -361,10 +360,11 @@ export async function fetchProductBySku(sku: string): Promise<OdooProduct | null
     fields: [
       'name', 'default_code', 'list_price', 'price_with_tax', 'qty_available', 'virtual_available', 'free_qty', 'weight',
       'barcode', 'categ_id', 'brand_id', 'description_sale',
-      'website_description', 'product_tmpl_id', 'product_template_image_ids',
-      'write_date', 'sale_ok', 'type',
+      'website_description', 'product_tmpl_id', 'product_template_image_ids', 'product_variant_image_ids',
+      'write_date', 'sale_ok', 'type', 'image_1920'
     ],
     limit: 1,
+    context: { bin_size: true },
   });
   if (products && products.length > 0) return products[0] as OdooProduct;
   return null;
