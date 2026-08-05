@@ -289,6 +289,9 @@ async function buildFullPayload(
     const imagesAttrs = buildImagesPayload(odooProduct, title);
     if (imagesAttrs.length > 0) {
       masterAttrs.images_attributes = imagesAttrs;
+      logger.info(MODULE, `buildFullPayload SKU=${odooProduct.default_code}: Sending ${imagesAttrs.length} images (main: ${imagesAttrs[0].remote_url})`);
+    } else {
+      logger.info(MODULE, `buildFullPayload SKU=${odooProduct.default_code}: No images to send`);
     }
   }
 

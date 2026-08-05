@@ -90,6 +90,7 @@ export interface OdooProduct {
   image_128?: string | boolean;
   product_tmpl_id: [number, string] | false;
   product_template_image_ids: number[];
+  product_variant_image_ids?: number[];
   write_date: string;
   sale_ok: boolean;
   type: string;
@@ -123,7 +124,7 @@ export async function fetchProducts(
     fields: [
       'name', 'default_code', 'list_price', 'price_with_tax', 'qty_available', 'virtual_available', 'free_qty', 'weight',
       'barcode', 'categ_id', 'brand_id', 'description_sale',
-      'website_description', 'product_tmpl_id', 'product_template_image_ids',
+      'website_description', 'product_tmpl_id', 'product_template_image_ids', 'product_variant_image_ids',
       'write_date', 'sale_ok', 'type', 'image_128'
     ],
     offset,
@@ -244,15 +245,22 @@ export function buildImageUrls(product: OdooProduct): OdooProductImageUrls {
   }
 
   // Additional images from product.image model
+  const extraImageIds = new Set<number>();
   if (product.product_template_image_ids && product.product_template_image_ids.length > 0) {
-    for (let i = 0; i < product.product_template_image_ids.length; i++) {
-      const imageId = product.product_template_image_ids[i];
-      result.additionalUrls.push({
-        id: imageId,
-        url: `${baseUrl}/web/image/product.image/${imageId}/image_1920/${safeSku}_ext_${i}.jpg`,
-        position: i + 2, // position 1 = main image, 2+ = additional
-      });
-    }
+    product.product_template_image_ids.forEach(id => extraImageIds.add(id));
+  }
+  if (product.product_variant_image_ids && product.product_variant_image_ids.length > 0) {
+    product.product_variant_image_ids.forEach(id => extraImageIds.add(id));
+  }
+
+  const extraImagesArray = Array.from(extraImageIds);
+  for (let i = 0; i < extraImagesArray.length; i++) {
+    const imageId = extraImagesArray[i];
+    result.additionalUrls.push({
+      id: imageId,
+      url: `${baseUrl}/web/image/product.image/${imageId}/image_1920/${safeSku}_ext_${i}.jpg`,
+      position: i + 2, // position 1 = main image, 2+ = additional
+    });
   }
 
   return result;
