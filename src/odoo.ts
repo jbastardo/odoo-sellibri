@@ -197,12 +197,12 @@ export interface ProductImage {
   image_1920: string | false;
 }
 
-/** Fetch the main image (image_1920) for a single product by ID.
+/** Fetch the main image (image_1920) for a single product template by ID.
  *  Returns the base64 string or null if no image exists.
  *  This avoids loading all images in bulk which causes OOM. */
-export async function fetchProductMainImage(productId: number): Promise<string | null> {
+export async function fetchProductMainImage(tmplId: number): Promise<string | null> {
   try {
-    const result = await execute('product.product', 'read', [[productId]], {
+    const result = await execute('product.template', 'read', [[tmplId]], {
       fields: ['image_1920'],
     });
     if (result && result.length > 0 && result[0].image_1920 && typeof result[0].image_1920 === 'string') {
@@ -210,7 +210,7 @@ export async function fetchProductMainImage(productId: number): Promise<string |
     }
     return null;
   } catch (err: any) {
-    logger.warn(MODULE, `Failed to fetch image for product ${productId}: ${err.message}`);
+    logger.warn(MODULE, `Failed to fetch image for template ${tmplId}: ${err.message}`);
     return null;
   }
 }
