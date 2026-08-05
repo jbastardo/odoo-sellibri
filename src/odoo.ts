@@ -231,13 +231,15 @@ export function buildImageUrls(product: OdooProduct): OdooProductImageUrls {
     ? product.product_tmpl_id[0] 
     : product.product_tmpl_id;
 
+  const safeSku = encodeURIComponent(product.default_code.replace(/[^a-zA-Z0-9_-]/g, '_'));
+
   // We check if image_128 is truthy (Odoo returns false if the product has NO image)
   if (product.image_128) {
     if (tmplId) {
-      result.mainUrl = `${baseUrl}/web/image/product.template/${tmplId}/image_1920`;
+      result.mainUrl = `${baseUrl}/web/image/product.template/${tmplId}/image_1920/${safeSku}_main.jpg`;
     } else {
       // Fallback just in case
-      result.mainUrl = `${baseUrl}/web/image/product.product/${product.id}/image_1920`;
+      result.mainUrl = `${baseUrl}/web/image/product.product/${product.id}/image_1920/${safeSku}_main.jpg`;
     }
   }
 
@@ -247,7 +249,7 @@ export function buildImageUrls(product: OdooProduct): OdooProductImageUrls {
       const imageId = product.product_template_image_ids[i];
       result.additionalUrls.push({
         id: imageId,
-        url: `${baseUrl}/web/image/product.image/${imageId}/image_1920`,
+        url: `${baseUrl}/web/image/product.image/${imageId}/image_1920/${safeSku}_ext_${i}.jpg`,
         position: i + 2, // position 1 = main image, 2+ = additional
       });
     }
