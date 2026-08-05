@@ -432,7 +432,12 @@ async function buildDiffPayload(
                               firstImageUrl.includes('placeholder') ||
                               firstImageUrl === '';
 
-  if (sellibriImages.length === 0 || isFirstImageInvalid) {
+  const extraImageIds = new Set<number>();
+  if (odooProduct.product_template_image_ids) odooProduct.product_template_image_ids.forEach(id => extraImageIds.add(id));
+  if (odooProduct.product_variant_image_ids) odooProduct.product_variant_image_ids.forEach(id => extraImageIds.add(id));
+  const odooImageCount = (odooProduct.image_128 ? 1 : 0) + extraImageIds.size;
+
+  if (sellibriImages.length === 0 || isFirstImageInvalid || sellibriImages.length !== odooImageCount) {
     const imagesAttrs = await buildImagesPayload(odooProduct, odooTitle);
     if (imagesAttrs.length > 0) {
       masterAttrs.images_attributes = imagesAttrs;
