@@ -224,11 +224,18 @@ export function buildImageUrls(product: OdooProduct): OdooProductImageUrls {
     additionalUrls: [],
   };
 
-  // Main image — uses the product.product ID
-  // We check if image_1920 exists (truthy = has image)
-  // But since we don't fetch image_1920 in bulk, we always generate the URL
-  // and let Sellibri try to fetch it (it returns a placeholder if no image)
-  result.mainUrl = `${baseUrl}/web/image/product.product/${product.id}/image_1920`;
+  // Main image — uses the product.template ID which is PUBLIC
+  // If product_tmpl_id is an array (e.g. [123, 'Name']), we take the first element
+  const tmplId = Array.isArray(product.product_tmpl_id) 
+    ? product.product_tmpl_id[0] 
+    : product.product_tmpl_id;
+
+  if (tmplId) {
+    result.mainUrl = `${baseUrl}/web/image/product.template/${tmplId}/image_1920`;
+  } else {
+    // Fallback just in case
+    result.mainUrl = `${baseUrl}/web/image/product.product/${product.id}/image_1920`;
+  }
 
   // Additional images from product.image model
   if (product.product_template_image_ids && product.product_template_image_ids.length > 0) {
