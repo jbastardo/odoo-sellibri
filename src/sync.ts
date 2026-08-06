@@ -304,11 +304,11 @@ async function buildFullPayload(
     tax_rate_id: config.sellibri.taxRateId,
     stock_items_attributes: [{
       stock_location_id: config.sellibri.stockLocationId,
-      available: Math.max(0, Math.floor((odooProduct.virtual_available !== undefined ? odooProduct.virtual_available : odooProduct.qty_available) || 0)),
+      available: Math.max(0, Math.floor(odooProduct.qty_available || 0)),
     }],
   };
   
-  logger.info(MODULE, `buildFullPayload SKU=${odooProduct.default_code}: qty_available=${odooProduct.qty_available}, virtual_available=${odooProduct.virtual_available}, sending available=${Math.max(0, Math.floor((odooProduct.virtual_available !== undefined ? odooProduct.virtual_available : odooProduct.qty_available) || 0))}`);
+  logger.info(MODULE, `buildFullPayload SKU=${odooProduct.default_code}: qty_available=${odooProduct.qty_available}, virtual_available=${odooProduct.virtual_available}, sending available=${Math.max(0, Math.floor(odooProduct.qty_available || 0))}`);
 
   if (includeImages) {
     const imagesAttrs = await buildImagesPayload(odooProduct, title);
@@ -344,7 +344,7 @@ async function buildDiffPayload(
   if (!variant) return await buildFullPayload(odooProduct, false);
 
   const odooPrice = getSellibriPrice(odooProduct);
-  const odooStock = Math.max(0, Math.floor(odooProduct.virtual_available || odooProduct.qty_available || 0));
+  const odooStock = Math.max(0, Math.floor(odooProduct.qty_available || 0));
   const odooTitle = await getProductTitle(odooProduct);
     const odooDescription = await getDescription(odooProduct);
   const categId = Array.isArray(odooProduct.categ_id) ? odooProduct.categ_id[0] : 0;
@@ -569,7 +569,7 @@ export async function syncMirror(): Promise<MirrorSyncResult> {
               sellibriVariantId: existing.all_variants?.[0]?.id || 0,
               odooWriteDate: product.write_date,
               lastSynced: new Date().toISOString(),
-              lastStock: Math.max(0, Math.floor(product.virtual_available || product.qty_available || 0)),
+              lastStock: Math.max(0, Math.floor(product.qty_available || 0)),
               lastPrice: getSellibriPrice(product),
             };
           } else {
@@ -583,7 +583,7 @@ export async function syncMirror(): Promise<MirrorSyncResult> {
               sellibriVariantId: newProduct.all_variants?.[0]?.id || 0,
               odooWriteDate: product.write_date,
               lastSynced: new Date().toISOString(),
-              lastStock: Math.max(0, Math.floor(product.virtual_available || product.qty_available || 0)),
+              lastStock: Math.max(0, Math.floor(product.qty_available || 0)),
               lastPrice: getSellibriPrice(product),
             };
           }
@@ -668,7 +668,7 @@ export async function syncMirror(): Promise<MirrorSyncResult> {
               sellibriVariantId: 0,
               odooWriteDate: missedProduct.write_date,
               lastSynced: new Date().toISOString(),
-              lastStock: Math.max(0, Math.floor(missedProduct.virtual_available || missedProduct.qty_available || 0)),
+              lastStock: Math.max(0, Math.floor(missedProduct.qty_available || 0)),
               lastPrice: getSellibriPrice(missedProduct),
             };
             syncedMissed++;
@@ -902,7 +902,7 @@ export async function syncSingleSku(sku: string): Promise<{ success: boolean; me
       sellibriVariantId: variantId,
       odooWriteDate: odooProduct.write_date,
       lastSynced: new Date().toISOString(),
-      lastStock: Math.max(0, Math.floor(odooProduct.virtual_available || odooProduct.qty_available || 0)),
+      lastStock: Math.max(0, Math.floor(odooProduct.qty_available || 0)),
       lastPrice: getSellibriPrice(odooProduct),
     };
     saveState(state);
@@ -953,7 +953,7 @@ export async function restoreProduct(sku: string): Promise<{ success: boolean; m
       sellibriVariantId: variantId,
       odooWriteDate: odooProduct.write_date,
       lastSynced: new Date().toISOString(),
-      lastStock: Math.max(0, Math.floor(odooProduct.virtual_available || odooProduct.qty_available || 0)),
+      lastStock: Math.max(0, Math.floor(odooProduct.qty_available || 0)),
       lastPrice: getSellibriPrice(odooProduct),
     };
     saveState(state);
@@ -1016,7 +1016,7 @@ export async function syncPriceStock(): Promise<void> {
     for (const p of products) {
       if (p.default_code) {
         odooDataMap.set(p.default_code, {
-          qty: Math.max(0, Math.floor((p.virtual_available !== undefined ? p.virtual_available : p.qty_available) || 0)),
+          qty: Math.max(0, Math.floor(p.qty_available || 0)),
           price: p.price_with_tax > 0 ? p.price_with_tax.toFixed(2) : '0.00',
         });
       }
