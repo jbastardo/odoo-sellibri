@@ -246,34 +246,22 @@ async function buildImagesPayload(odooProduct: odoo.OdooProduct, title: string):
   const attrs: sellibri.SellibriImageAttribute[] = [];
   let currentPosition = 1;
 
-  const hasMainImage = !!odooProduct.image_128;
-  
-  if (hasMainImage && odooProduct.product_tmpl_id) {
-    const tmplId = Array.isArray(odooProduct.product_tmpl_id) 
-      ? odooProduct.product_tmpl_id[0] 
-      : (odooProduct.product_tmpl_id as unknown as number);
-    
-    // We proxy the image through our own server to bypass Odoo's unauthenticated blocks
-    const proxyUrl = `${config.publicUrl}/api/images/template/${tmplId}`;
+  if (imageUrls.mainUrl) {
     attrs.push({
-      remote_url: proxyUrl,
+      remote_url: imageUrls.mainUrl,
       position: currentPosition++,
-      alt: title
+      alt: title,
     });
-    logger.info(MODULE, `SKU=${odooProduct.default_code}: Added main image (proxy: ${proxyUrl})`);
+    logger.info(MODULE, `SKU=${odooProduct.default_code}: Added main image (${imageUrls.mainUrl})`);
   }
 
-  if (imageUrls.additionalUrls.length > 0) {
-    const extraIds = imageUrls.additionalUrls.map(u => u.id);
-    for (const id of extraIds) {
-      const proxyUrl = `${config.publicUrl}/api/images/extra/${id}`;
-      attrs.push({
-        remote_url: proxyUrl,
-        position: currentPosition++,
-        alt: title
-      });
-      logger.info(MODULE, `SKU=${odooProduct.default_code}: Added extra image ${id} (proxy: ${proxyUrl})`);
-    }
+  for (const extra of imageUrls.additionalUrls) {
+    attrs.push({
+      remote_url: extra.url,
+      position: currentPosition++,
+      alt: title,
+    });
+    logger.info(MODULE, `SKU=${odooProduct.default_code}: Added extra image ${extra.id} (${extra.url})`);
   }
 
   return attrs;
@@ -997,9 +985,28 @@ export async function syncPriceStock(): Promise<void> {
   let errors = 0;
 
   try {
-    const trackedSkus = Object.keys(state.products);
+    let trackedSkus = Object.keys(state.products);
     if (trackedSkus.length === 0) {
-      logger.info(MODULE, 'No products tracked yet, skipping price/stock sync');
+      logger.info(MODULE, 'No products tracked in state -- loading existing Sellibri catalog to bootstrap state...');
+      const catalog = await sellibri.getCatalog();
+      for (const [sku, prod] of catalog.entries()) {
+        const variant = prod.all_variants?.[0];
+        state.products[sku] = {
+          sellibriId: prod.id,
+          sellibriVariantId: variant?.id || 0,
+          odooWriteDate: '',
+          lastSynced: new Date().toISOString(),
+          lastStock: variant?.stock_items?.[0]?.available,
+          lastPrice: variant?.price,
+        };
+      }
+      saveState(state);
+      trackedSkus = Object.keys(state.products);
+      logger.info(MODULE, `Bootstrapped ${trackedSkus.length} products from Sellibri catalog`);
+    }
+
+    if (trackedSkus.length === 0) {
+      logger.info(MODULE, 'No products found in Sellibri catalog, skipping price/stock sync');
       return;
     }
 

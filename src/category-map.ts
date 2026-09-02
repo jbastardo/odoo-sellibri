@@ -1,4 +1,4 @@
-import axios from 'axios';
+import { apiGet, apiPost } from './sellibri';
 import { config } from './config';
 import { logger } from './logger';
 
@@ -33,22 +33,16 @@ function normalizeName(name: string): string {
 
 /** Load all Sellibri taxonomies and their root taxons */
 async function loadSellibriTaxons(): Promise<Map<string, { taxonomyId: number; taxonId: number; name: string }>> {
-  const client = axios.create({
-    baseURL: config.sellibri.baseUrl,
-    headers: { 'X-Api-Key': config.sellibri.apiKey, 'Content-Type': 'application/json' },
-    timeout: 15000,
-  });
-
   const map = new Map<string, { taxonomyId: number; taxonId: number; name: string }>();
 
   try {
-    const resp = await client.get('/taxonomies');
-    const taxonomies = resp.data.taxonomies || [];
+    const data = await apiGet('/taxonomies');
+    const taxonomies = data.taxonomies || [];
 
     for (const tax of taxonomies) {
       try {
-        const txResp = await client.get(`/taxonomies/${tax.id}/taxons`);
-        const taxons = txResp.data.taxons || [];
+        const txData = await apiGet(`/taxonomies/${tax.id}/taxons`);
+        const taxons = txData.taxons || [];
         for (const t of taxons) {
           const key = normalizeName(t.name);
           map.set(key, { taxonomyId: tax.id, taxonId: t.id, name: t.name });
@@ -64,31 +58,25 @@ async function loadSellibriTaxons(): Promise<Map<string, { taxonomyId: number; t
 
 /** Create a new taxonomy + taxon in Sellibri */
 async function createSellibriTaxonomy(name: string): Promise<{ taxonomyId: number; taxonId: number } | null> {
-  const client = axios.create({
-    baseURL: config.sellibri.baseUrl,
-    headers: { 'X-Api-Key': config.sellibri.apiKey, 'Content-Type': 'application/json' },
-    timeout: 15000,
-  });
-
   try {
-    const resp = await client.post('/taxonomies', { taxonomy: { name } });
-    const taxonomy = resp.data.taxonomy || resp.data;
+    const data = await apiPost('/taxonomies', { taxonomy: { name } });
+    const taxonomy = data.taxonomy || data;
     const taxonomyId = taxonomy.id;
 
     // The taxonomy creation usually creates a root taxon automatically
     // Fetch the taxons to get the root taxon ID
-    const txResp = await client.get(`/taxonomies/${taxonomyId}/taxons`);
-    const taxons = txResp.data.taxons || [];
+    const txData = await apiGet(`/taxonomies/${taxonomyId}/taxons`);
+    const taxons = txData.taxons || [];
     if (taxons.length > 0) {
       logger.info(MODULE, `Created taxonomy "${name}" (id=${taxonomyId}, taxon_id=${taxons[0].id})`);
       return { taxonomyId, taxonId: taxons[0].id };
     }
 
     // If no root taxon, create one
-    const txCreate = await client.post(`/taxonomies/${taxonomyId}/taxons`, {
+    const txCreate = await apiPost(`/taxonomies/${taxonomyId}/taxons`, {
       taxon: { name },
     });
-    const taxon = txCreate.data.taxon || txCreate.data;
+    const taxon = txCreate.data?.taxon || txCreate.taxon || txCreate;
     logger.info(MODULE, `Created taxonomy "${name}" (id=${taxonomyId}, taxon_id=${taxon.id})`);
     return { taxonomyId, taxonId: taxon.id };
   } catch (err: any) {

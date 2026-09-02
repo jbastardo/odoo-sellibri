@@ -86,7 +86,7 @@ async function withRetry<T>(fn: () => Promise<T>, maxRetries = 3): Promise<T> {
   throw new Error('Max retries exceeded');
 }
 
-async function apiGet<T = any>(path: string, params?: Record<string, any>): Promise<T> {
+export async function apiGet<T = any>(path: string, params?: Record<string, any>): Promise<T> {
   return withRetry(async () => {
     await rateLimiter.waitForSlot();
     const resp = await client.get(path, { params });
@@ -94,7 +94,7 @@ async function apiGet<T = any>(path: string, params?: Record<string, any>): Prom
   });
 }
 
-async function apiPost<T = any>(path: string, data: any): Promise<T> {
+export async function apiPost<T = any>(path: string, data: any): Promise<T> {
   return withRetry(async () => {
     await rateLimiter.waitForSlot();
     try {
@@ -109,7 +109,7 @@ async function apiPost<T = any>(path: string, data: any): Promise<T> {
   });
 }
 
-async function apiPatch<T = any>(path: string, data: any): Promise<T> {
+export async function apiPatch<T = any>(path: string, data: any): Promise<T> {
   return withRetry(async () => {
     await rateLimiter.waitForSlot();
     try {
@@ -124,7 +124,7 @@ async function apiPatch<T = any>(path: string, data: any): Promise<T> {
   });
 }
 
-async function apiDelete<T = any>(path: string): Promise<T> {
+export async function apiDelete<T = any>(path: string): Promise<T> {
   return withRetry(async () => {
     await rateLimiter.waitForSlot();
     const resp = await client.delete(path);
