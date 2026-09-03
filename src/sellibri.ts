@@ -65,7 +65,7 @@ const client: AxiosInstance = axios.create({
   maxContentLength: Infinity,
 });
 
-/** Retry wrapper with adaptive backoff on 429 */
+/** Retry wrapper with adaptive backoff on 429 and transient errors (502, 503, 504) */
 async function withRetry<T>(fn: () => Promise<T>, maxRetries = 3): Promise<T> {
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     try {
@@ -74,9 +74,10 @@ async function withRetry<T>(fn: () => Promise<T>, maxRetries = 3): Promise<T> {
       return result;
     } catch (err: any) {
       const status = (err as AxiosError)?.response?.status;
-      if (status === 429 && attempt < maxRetries) {
-        const waitMs = Math.pow(2, attempt) * 30_000; // 30s, 60s, 120s
-        rateLimiter.triggerCooldown(waitMs);
+      if ((status === 429 || status === 502 || status === 503 || status === 504) && attempt < maxRetries) {
+        const waitMs = status === 429 ? Math.pow(2, attempt) * 30_000 : (attempt + 1) * 3000;
+        logger.warn(MODULE, `Sellibri API returned HTTP ${status}, retrying in ${(waitMs / 1000).toFixed(1)}s (attempt ${attempt + 1}/${maxRetries})...`);
+        if (status === 429) rateLimiter.triggerCooldown(waitMs);
         await new Promise(resolve => setTimeout(resolve, waitMs));
         continue;
       }
@@ -176,7 +177,7 @@ export interface SellibriVariantDetail {
   width: string | null;
   height: string | null;
   length: string | null;
-  images: { id: number; url: string }[];
+  images: { id: number; url?: string; image?: string }[];
   stock_items: { id: number; stock_location_id: number; available: number }[];
 }
 

@@ -413,24 +413,29 @@ async function buildDiffPayload(
   }
 
   const sellibriImages = variant.images || [];
-  const firstImageUrl = sellibriImages.length > 0 ? (sellibriImages[0].url || '').toLowerCase() : '';
+  const firstImageObj = sellibriImages[0] as any;
+  const firstImageUrl = firstImageObj ? (firstImageObj.image || firstImageObj.url || '').toLowerCase() : '';
   const isFirstImageInvalid = firstImageUrl.includes('missing') || 
                               firstImageUrl.includes('default') || 
                               firstImageUrl.includes('fallback') || 
                               firstImageUrl.includes('placeholder') ||
                               firstImageUrl === '';
 
+  const hasPlaceholderImage = sellibriImages.some((img: any) => 
+    (img.image || img.url || '').toLowerCase().includes('placeholder')
+  );
+
   const extraImageIds = new Set<number>();
   if (odooProduct.product_template_image_ids) odooProduct.product_template_image_ids.forEach(id => extraImageIds.add(id));
   if (odooProduct.product_variant_image_ids) odooProduct.product_variant_image_ids.forEach(id => extraImageIds.add(id));
   const odooImageCount = (odooProduct.image_128 ? 1 : 0) + extraImageIds.size;
 
-  if (sellibriImages.length === 0 || isFirstImageInvalid || sellibriImages.length !== odooImageCount) {
+  if (sellibriImages.length === 0 || isFirstImageInvalid || hasPlaceholderImage || sellibriImages.length !== odooImageCount) {
     const imagesAttrs = await buildImagesPayload(odooProduct, odooTitle);
     if (imagesAttrs.length > 0) {
       masterAttrs.images_attributes = imagesAttrs;
       
-      // Also destroy any existing images so they don't accumulate
+      // Also destroy any existing images so they don't accumulate or keep placeholder
       if (sellibriImages.length > 0) {
         sellibriImages.forEach((img: any) => {
           masterAttrs.images_attributes!.push({ id: img.id, _destroy: true } as any);
@@ -833,20 +838,20 @@ export async function syncSingleSku(sku: string): Promise<{ success: boolean; me
     const title = await getProductTitle(odooProduct);
         logger.info(MODULE, `SKU=${sku} DIAG: resolved title="${title}"`);
 
-    const catalog = await sellibri.getCatalog();
-    let existingProduct = catalog.get(sku) || null;
+    let existingProduct: sellibri.SellibriProduct | null = null;
+    const st = loadState();
+    const cached = st.products[sku];
+    if (cached?.sellibriId) {
+      try {
+        existingProduct = await sellibri.fetchProductById(cached.sellibriId);
+      } catch {
+        // Product may have been deleted, fallback to catalog
+      }
+    }
 
     if (!existingProduct) {
-      const st = loadState();
-      const cached = st.products[sku];
-      if (cached?.sellibriId) {
-        try {
-          const fetched = await sellibri.fetchProductById(cached.sellibriId);
-          if (fetched) existingProduct = fetched;
-        } catch {
-          // Product doesn't exist, that's fine
-        }
-      }
+      const catalog = await sellibri.getCatalog();
+      existingProduct = catalog.get(sku) || null;
     }
 
     let sellibriId: number;

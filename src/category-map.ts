@@ -86,66 +86,15 @@ async function createSellibriTaxonomy(name: string): Promise<{ taxonomyId: numbe
 }
 
 /** Build the category mapping dynamically.
- *  Matches Odoo categories to Sellibri taxons by name.
- *  Creates missing taxons in Sellibri.
+ *  Uses pre-mapped Sellibri taxons from STATIC_MAP.
  *  Called once at sync start, cached for the session. */
 export async function buildCategoryMap(odooCategories: { id: number; name: string }[]): Promise<void> {
-  logger.info(MODULE, `Building category map: ${odooCategories.length} Odoo categories`);
-
-  const sellibriTaxons = await loadSellibriTaxons();
-  logger.info(MODULE, `Sellibri has ${sellibriTaxons.size} taxons`);
-
   categoryMap = new Map();
-
-  // Find or set the default taxon (OTROS)
-  const otrosKey = normalizeName('OTROS');
-  const otros = sellibriTaxons.get(otrosKey);
-  defaultTaxonId = otros?.taxonId || 0;
-
-  for (const cat of odooCategories) {
-    const key = normalizeName(cat.name);
-
-    // Try exact match
-    let match = sellibriTaxons.get(key);
-
-    // Try common variations
-    if (!match) {
-      // "Alarma" → "Alarmas"
-      match = sellibriTaxons.get(key + 's');
-    }
-    if (!match) {
-      // "Alarmas" → "Alarma"
-      match = sellibriTaxons.get(key.replace(/s$/, ''));
-    }
-    if (!match) {
-      // "Control Acceso" → "Control de Acceso"
-      for (const [sellibriKey, val] of sellibriTaxons) {
-        if (sellibriKey.includes(key) || key.includes(sellibriKey)) {
-          match = val;
-          break;
-        }
-      }
-    }
-
-    if (match) {
-      categoryMap.set(cat.id, match.taxonId);
-      logger.info(MODULE, `  Mapped "${cat.name}" (${cat.id}) → "${match.name}" (${match.taxonId})`);
-    } else {
-      // Create the category in Sellibri
-      logger.info(MODULE, `  Category "${cat.name}" not found in Sellibri — creating...`);
-      const created = await createSellibriTaxonomy(cat.name);
-      if (created) {
-        categoryMap.set(cat.id, created.taxonId);
-        sellibriTaxons.set(key, { taxonomyId: created.taxonomyId, taxonId: created.taxonId, name: cat.name });
-      } else {
-        // Fallback to OTROS
-        categoryMap.set(cat.id, defaultTaxonId);
-        logger.warn(MODULE, `  "${cat.name}" → fallback to OTROS (${defaultTaxonId})`);
-      }
-    }
+  for (const [k, v] of Object.entries(STATIC_MAP)) {
+    categoryMap.set(Number(k), v);
   }
-
-  logger.info(MODULE, `Category map built: ${categoryMap.size} mappings, default=${defaultTaxonId}`);
+  defaultTaxonId = 8318;
+  logger.info(MODULE, `Category map initialized with ${categoryMap.size} mappings (default=${defaultTaxonId})`);
 }
 
 /** Get the Sellibri taxon ID for an Odoo category.

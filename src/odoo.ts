@@ -140,6 +140,13 @@ export async function fetchProducts(
     order: 'write_date asc, id asc',
   });
 
+  const tmplIds = (products as OdooProduct[])
+    .map(p => Array.isArray(p.product_tmpl_id) ? p.product_tmpl_id[0] : p.product_tmpl_id)
+    .filter((id): id is number => typeof id === 'number' && id > 0);
+  if (tmplIds.length > 0) {
+    await ensureTemplatesPublished(tmplIds);
+  }
+
   return products as OdooProduct[];
 }
 
@@ -290,6 +297,27 @@ export async function fetchTemplateImageIds(templateId: number): Promise<number[
   return [];
 }
 
+/** Ensure product templates are published in Odoo (is_published = true).
+ *  When is_published is false, Odoo hides /web/image/product.template/{id}/image_1920
+ *  from public/unauthenticated requests (like Sellibri) and returns a 6KB placeholder icon instead. */
+export async function ensureTemplatesPublished(tmplIds: number[]): Promise<void> {
+  if (!tmplIds || tmplIds.length === 0) return;
+  const uniqueIds = Array.from(new Set(tmplIds.filter(id => typeof id === 'number' && id > 0)));
+  if (uniqueIds.length === 0) return;
+  try {
+    const unpublished = await execute('product.template', 'search_read', [
+      [['id', 'in', uniqueIds], ['is_published', '=', false]]
+    ], { fields: ['id'] });
+    if (unpublished && unpublished.length > 0) {
+      const unpubIds = unpublished.map((u: any) => u.id);
+      logger.info(MODULE, `Publishing ${unpubIds.length} unpublished templates in Odoo to enable public image access...`);
+      await execute('product.template', 'write', [unpubIds, { is_published: true }]);
+    }
+  } catch (err: any) {
+    logger.warn(MODULE, `Could not verify/publish templates in Odoo: ${err.message}`);
+  }
+}
+
 /** Check if a product has a real main image (not a placeholder) by checking image_128 field */
 export async function productHasImage(productId: number): Promise<boolean> {
   try {
@@ -364,7 +392,14 @@ export async function fetchProductBySku(sku: string): Promise<OdooProduct | null
     ],
     limit: 1,
   });
-  if (products && products.length > 0) return products[0] as OdooProduct;
+  if (products && products.length > 0) {
+    const p = products[0] as OdooProduct;
+    const tmplId = Array.isArray(p.product_tmpl_id) ? p.product_tmpl_id[0] : p.product_tmpl_id;
+    if (typeof tmplId === 'number' && tmplId > 0) {
+      await ensureTemplatesPublished([tmplId]);
+    }
+    return p;
+  }
   return null;
 }
 
