@@ -132,6 +132,10 @@ export function requestAbort(): boolean {
   return true;
 }
 
+export function isAbortRequested(): boolean {
+  return abortRequested;
+}
+
 export function resetSyncState(): void {
   try {
     if (fs.existsSync(STATE_FILE)) {
@@ -529,7 +533,7 @@ export async function syncMirror(): Promise<MirrorSyncResult> {
     const batchStartTime = Date.now();
     let processed = 0;
 
-    const concurrency = 3;
+    const concurrency = 4;
     const workers = Array.from({ length: concurrency }, async () => {
       while (odooProducts.length > 0 && !abortRequested) {
         const product = odooProducts.shift()!;
@@ -1066,46 +1070,62 @@ export async function syncPriceStock(): Promise<void> {
         estimatedSecondsLeft: null,
       };
 
-      for (let i = 0; i < toUpdate.length; i++) {
-        if (abortRequested) break;
-        const { sku, cached, odooData } = toUpdate[i];
+      const concurrency = 4;
+      let processed = 0;
+      
+      const workers = Array.from({ length: concurrency }, async () => {
+        while (toUpdate.length > 0 && !abortRequested) {
+          const item = toUpdate.shift();
+          if (!item) continue;
+          
+          const { sku, cached, odooData } = item;
 
-        try {
-          const masterAttrs: sellibri.SellibriMasterAttributes = {
-            sku,
-            price: odooData.price,
-            track_inventory: true,
-            tax_rate_id: config.sellibri.taxRateId,
-            stock_items_attributes: [{
-              stock_location_id: config.sellibri.stockLocationId,
-              available: odooData.qty,
-            }],
-          };
+          try {
+            const masterAttrs: sellibri.SellibriMasterAttributes = {
+              sku,
+              price: odooData.price,
+              track_inventory: true,
+              tax_rate_id: config.sellibri.taxRateId,
+              stock_items_attributes: [{
+                stock_location_id: config.sellibri.stockLocationId,
+                available: odooData.qty,
+              }],
+            };
 
-          await sellibri.updateProduct(cached.sellibriId, {
-            product: {
-              status: 'active',
-              master_attributes: masterAttrs,
-            },
-          });
+            await sellibri.updateProduct(cached.sellibriId, {
+              product: {
+                status: 'active',
+                master_attributes: masterAttrs,
+              },
+            });
 
-          const stockChanged = cached.lastStock === undefined || cached.lastStock !== odooData.qty;
-          const priceChanged = !cached.lastPrice || cached.lastPrice !== odooData.price;
-          if (priceChanged) priceUpdated++;
-          if (stockChanged) stockUpdated++;
+            const stockChanged = cached.lastStock === undefined || cached.lastStock !== odooData.qty;
+            const priceChanged = !cached.lastPrice || cached.lastPrice !== odooData.price;
+            if (priceChanged) priceUpdated++;
+            if (stockChanged) stockUpdated++;
 
-          state.products[sku].lastStock = odooData.qty;
-          state.products[sku].lastPrice = odooData.price;
-        } catch (err: any) {
-          errors++;
-          logger.error(MODULE, `Price/Stock error SKU=${sku}: ${err.message}`);
+            state.products[sku].lastStock = odooData.qty;
+            state.products[sku].lastPrice = odooData.price;
+          } catch (err: any) {
+            errors++;
+            logger.error(MODULE, `Price/Stock error SKU=${sku}: ${err.message}`);
+          }
+
+          processed++;
+          if (processed % 100 === 0) {
+            saveState(state);
+            updateProgress(processed, toUpdate.length + processed, batchStartTime, 'Actualizando precio/stock:');
+            logger.info(MODULE, `Price/Stock: ${processed}/${toUpdate.length + processed} (prices=${priceUpdated}, stock=${stockUpdated}, errors=${errors})`);
+          }
         }
+      });
 
-        if ((i + 1) % 100 === 0) {
-          saveState(state);
-          updateProgress(i + 1, toUpdate.length, batchStartTime, 'Actualizando precio/stock:');
-          logger.info(MODULE, `Price/Stock: ${i + 1}/${toUpdate.length} (prices=${priceUpdated}, stock=${stockUpdated}, errors=${errors})`);
-        }
+      await Promise.all(workers);
+      
+      // Update progress at the end
+      if (processed > 0 && processed % 100 !== 0) {
+        saveState(state);
+        updateProgress(processed, processed, batchStartTime, 'Actualizando precio/stock:');
       }
     }
 

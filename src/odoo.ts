@@ -2,6 +2,7 @@ import * as xmlrpc from 'xmlrpc';
 import axios from 'axios';
 import { config } from './config';
 import { logger } from './logger';
+import { isAbortRequested } from './sync';
 
 const MODULE = 'odoo';
 
@@ -22,12 +23,18 @@ function createClient(path: string): xmlrpc.Client {
 }
 
 function call(client: xmlrpc.Client, method: string, params: any[]): Promise<any> {
-  return new Promise((resolve, reject) => {
+  const timeoutPromise = new Promise((_, reject) => 
+    setTimeout(() => reject(new Error(`Odoo XML-RPC Timeout (${method}) tras 60s`)), 60000)
+  );
+
+  const callPromise = new Promise((resolve, reject) => {
     client.methodCall(method, params, (err: any, value: any) => {
       if (err) reject(err);
       else resolve(value);
     });
   });
+
+  return Promise.race([callPromise, timeoutPromise]);
 }
 
 let cachedUid: number | null = null;
@@ -156,6 +163,10 @@ export async function fetchAllProducts(lastWriteDate?: string): Promise<OdooProd
   const batchSize = 500;
 
   while (true) {
+    if (isAbortRequested()) {
+      logger.warn(MODULE, 'Abort requested -- stopping fetchAllProducts loop');
+      break;
+    }
     logger.info(MODULE, `Fetching products offset=${offset} limit=${batchSize}`);
     const batch = await fetchProducts(offset, batchSize, lastWriteDate);
     all.push(...batch);
@@ -183,6 +194,10 @@ export async function fetchStockAndPrices(): Promise<StockPriceProduct[]> {
   const batchSize = 1000;
 
   while (true) {
+    if (isAbortRequested()) {
+      logger.warn(MODULE, 'Abort requested -- stopping fetchStockAndPrices loop');
+      break;
+    }
     const batch = await execute('product.product', 'search_read', [
       [['active', '=', true], ['sale_ok', '=', true], ['type', 'in', ['product', 'consu']], ['default_code', '!=', false], ['default_code', '!=', '']],
     ], {

@@ -166,9 +166,6 @@ app.post('/api/sync/sku/:sku', async (req, res) => {
 // --- Abort ---
 app.post('/api/sync/abort', (_req, res) => {
   const aborted = requestAbort();
-  if (aborted) {
-    manualActionRunning = false;
-  }
   res.json({
     success: aborted,
     message: aborted ? 'Sincronizacion detenida' : 'No hay sincronizacion en curso',
