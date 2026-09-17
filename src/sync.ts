@@ -533,7 +533,7 @@ export async function syncMirror(): Promise<MirrorSyncResult> {
     const batchStartTime = Date.now();
     let processed = 0;
 
-    const concurrency = 4;
+    const concurrency = 1;
     const workers = Array.from({ length: concurrency }, async () => {
       while (odooProducts.length > 0 && !abortRequested) {
         const product = odooProducts.shift()!;
@@ -1070,7 +1070,7 @@ export async function syncPriceStock(): Promise<void> {
         estimatedSecondsLeft: null,
       };
 
-      const concurrency = 4;
+      const concurrency = 1;
       let processed = 0;
       
       const workers = Array.from({ length: concurrency }, async () => {
